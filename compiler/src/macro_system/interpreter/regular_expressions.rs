@@ -60,7 +60,7 @@ impl MacroInterpreter {
                     .min(input.len());
                 let matched = input
                     .get(offset..end)
-                    .and_then(|input| regex.captures(input));
+                    .and_then(|input| regex.captures(input).ok().flatten());
                 let found = matched.is_some();
                 let mut updated = object.as_ref().clone();
                 updated.remove("groups");
@@ -97,7 +97,10 @@ impl MacroInterpreter {
                                 "pos".into(),
                                 MacroValue::Int((offset + whole.start()) as i64),
                             ),
-                            ("len".into(), MacroValue::Int(whole.len() as i64)),
+                            (
+                                "len".into(),
+                                MacroValue::Int((whole.end() - whole.start()) as i64),
+                            ),
                         ])),
                     );
                 }
@@ -127,15 +130,21 @@ impl MacroInterpreter {
                 }),
             "replace" => {
                 let replacement = args.get(1).and_then(MacroValue::as_string).unwrap_or("");
-                let result = if flags.contains('g') {
-                    regex.replace_all(input, replacement)
-                } else {
-                    regex.replace(input, replacement)
-                };
+                let limit = if flags.contains('g') { 0 } else { 1 };
+                let result = regex
+                    .try_replacen(input, limit, replacement)
+                    .map_err(|error| MacroError::TypeError {
+                        message: format!("regular expression failed: {error}"),
+                        location,
+                    })?;
                 Ok(MacroValue::from_str(&result))
             }
             "split" => Ok(MacroValue::array(
-                regex.split(input).map(MacroValue::from_str).collect(),
+                regex
+                    .split(input)
+                    .filter_map(Result::ok)
+                    .map(MacroValue::from_str)
+                    .collect(),
             )),
             _ => Err(MacroError::UnsupportedOperation {
                 operation: format!("EReg.{method}"),
@@ -145,19 +154,20 @@ impl MacroInterpreter {
     }
 }
 
+/// A backtracking engine, as Haxe's EReg takes backreferences and lookaround.
 fn compile(
     pattern: &str,
     flags: &str,
     location: SourceLocation,
-) -> Result<regex::Regex, MacroError> {
-    regex::RegexBuilder::new(pattern)
-        .case_insensitive(flags.contains('i'))
-        .multi_line(flags.contains('m'))
-        .dot_matches_new_line(flags.contains('s'))
-        .ignore_whitespace(flags.contains('x'))
-        .build()
-        .map_err(|error| MacroError::TypeError {
-            message: format!("invalid regular expression: {error}"),
-            location,
-        })
+) -> Result<fancy_regex::Regex, MacroError> {
+    let inline: String = flags.chars().filter(|c| "imsx".contains(*c)).collect();
+    let source = if inline.is_empty() {
+        pattern.to_string()
+    } else {
+        format!("(?{inline}){pattern}")
+    };
+    fancy_regex::Regex::new(&source).map_err(|error| MacroError::TypeError {
+        message: format!("invalid regular expression: {error}"),
+        location,
+    })
 }

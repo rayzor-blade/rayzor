@@ -606,6 +606,7 @@ dependencies = [
  "criterion",
  "diagnostics",
  "env_logger",
+ "fancy-regex",
  "half",
  "indexmap",
  "inkwell",
