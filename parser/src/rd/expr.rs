@@ -2199,6 +2199,8 @@ fn takes_postfix(expr: &Expr) -> bool {
             | ExprKind::DoWhile { .. }
             | ExprKind::Try { .. }
             | ExprKind::Function(_)
+            | ExprKind::Var { .. }
+            | ExprKind::Final { .. }
     )
 }
 
