@@ -259,6 +259,8 @@ impl<'a> HirToMirContext<'a> {
         for (symbol_id, loop_phi_reg) in &phi_nodes {
             if let Some((_, var_type)) = loop_var_initial_values.get(symbol_id) {
                 let exit_param_reg = self.builder.alloc_reg().unwrap();
+                self.builder
+                    .set_register_type(exit_param_reg, var_type.clone());
 
                 // The incoming edge comes from the block that actually branches to
                 // exit (cond_end_block, not necessarily cond_block).

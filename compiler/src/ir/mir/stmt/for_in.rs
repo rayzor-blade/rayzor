@@ -434,6 +434,8 @@ impl<'a> HirToMirContext<'a> {
         for (symbol_id, loop_phi_reg) in &phi_nodes {
             if let Some((_, var_type)) = loop_var_initial_values.get(symbol_id) {
                 let exit_param_reg = self.builder.alloc_reg().unwrap();
+                self.builder
+                    .set_register_type(exit_param_reg, var_type.clone());
 
                 if let Some(func) = self.builder.current_function_mut() {
                     if let Some(exit_block_data) = func.cfg.get_block_mut(loop_exit_block) {
