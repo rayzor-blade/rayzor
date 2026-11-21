@@ -962,6 +962,7 @@ impl<'a> HirToMirContext<'a> {
                     arg_regs.push(reg);
                 }
             }
+            self.fill_default_args(ctor_fn, &mut arg_regs, true);
             self.builder
                 .build_call_direct(ctor_fn, arg_regs, IrType::Void);
             for arg in args.iter() {
@@ -996,9 +997,13 @@ impl<'a> HirToMirContext<'a> {
             let target = match self.external_function_name_map.get(&ctor_key).copied() {
                 Some(ctor_fn) => {
                     self.coerce_args_for_cross_module_call(ctor_fn, &mut arg_regs, true, &[]);
+                    self.fill_default_args(ctor_fn, &mut arg_regs, true);
                     ctor_fn
                 }
                 None => {
+                    // Omitted trailing optional arguments are null: the stub
+                    // takes the declared parameters, not the arguments written.
+                    self.pad_omitted_constructor_args(actual_symbol_id, &ctor_key, &mut arg_regs);
                     let param_types: Vec<IrType> = arg_regs
                         .iter()
                         .map(|r| {

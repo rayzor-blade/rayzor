@@ -1,0 +1,5 @@
+[project]
+name = "constructor-args-in-import-cycle"
+entry = "./CtorArgsInImportCycle.hx"
+[build]
+class-paths = [".", "vendor"]

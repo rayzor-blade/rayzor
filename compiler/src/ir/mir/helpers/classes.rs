@@ -890,6 +890,106 @@ impl<'a> HirToMirContext<'a> {
         Some(format!("{}.new", owner))
     }
 
+    /// The number of parameters `class_fqn`'s constructor declares, its own
+    /// or the one it inherits.
+    pub(crate) fn constructor_arity(&self, class_fqn: &str) -> Option<usize> {
+        let index = self.static_sig_index.as_ref()?.clone();
+        let mut index = index.borrow_mut();
+        index.constructor_owner(class_fqn).map(|(_, arity)| arity)
+    }
+
+    /// Fills the arguments a call constructing `class` (whose constructor is
+    /// `ctor_key`, `X.new`) omits: a `Null<Int>` is null, anything else the zero
+    /// of its type. The types are those of the constructor `class` declares or
+    /// inherits; without one, the declared arity is null-filled.
+    pub(crate) fn pad_omitted_constructor_args(
+        &mut self,
+        class: Option<SymbolId>,
+        ctor_key: &str,
+        arg_regs: &mut Vec<IrId>,
+    ) {
+        // A class compiled later often reaches here unresolved; its name does not.
+        let class = class.or_else(|| {
+            let fqn = ctor_key.strip_suffix(".new")?;
+            let name = self.string_interner.get_id(fqn)?;
+            self.symbol_table.resolve_qualified_name(name)
+        });
+        let params = class
+            .and_then(|class| self.inherited_constructor_params(class))
+            .or_else(|| {
+                // Its hierarchy may not be registered yet; the declarations name it.
+                let mut name = ctor_key.strip_suffix(".new")?.to_string();
+                let index = self.static_sig_index.as_ref()?.clone();
+                for _ in 0..16 {
+                    let symbol = self
+                        .string_interner
+                        .get_id(&name)
+                        .and_then(|n| self.symbol_table.resolve_qualified_name(n));
+                    if let Some(params) = symbol.and_then(|s| self.constructor_params_of(s)) {
+                        return Some(params);
+                    }
+                    name = index.borrow_mut().parent_of(&name)?;
+                }
+                None
+            });
+        let arity = match &params {
+            Some(params) => params.len(),
+            None => match ctor_key
+                .strip_suffix(".new")
+                .and_then(|fqn| self.constructor_arity(fqn))
+            {
+                Some(arity) => arity,
+                None => return,
+            },
+        };
+        // The receiver is the first argument.
+        while arg_regs.len() < arity + 1 {
+            let ty = params
+                .as_ref()
+                .and_then(|p| p.get(arg_regs.len() - 1))
+                .map(|ty| self.convert_type(*ty))
+                .unwrap_or(IrType::I64);
+            let reg = if ty == IrType::NullInt {
+                self.builder.build_null_int()
+            } else {
+                self.zero_of_ir_type(&ty)
+                    .or_else(|| self.builder.build_const(IrValue::I64(0)))
+            };
+            match reg {
+                Some(reg) => arg_regs.push(reg),
+                None => break,
+            }
+        }
+    }
+
+    /// The parameter types of the constructor `class` declares, or else of the
+    /// nearest ancestor's.
+    fn inherited_constructor_params(&self, class: SymbolId) -> Option<Vec<TypeId>> {
+        let mut current = Some(class);
+        for _ in 0..16 {
+            let symbol = current?;
+            if let Some(params) = self.constructor_params_of(symbol) {
+                return Some(params);
+            }
+            let parent = self.symbol_table.get_class_hierarchy(symbol)?.superclass?;
+            current = match self.type_table.get(parent).map(|t| &t.kind) {
+                Some(TypeKind::Class { symbol_id, .. }) => Some(*symbol_id),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    /// The parameter types of the constructor `class` itself declares.
+    fn constructor_params_of(&self, class: SymbolId) -> Option<Vec<TypeId>> {
+        let ctor = self.symbol_table.get_class_constructor(class)?;
+        let ty = self.symbol_table.get_symbol(ctor)?.type_id;
+        match self.type_table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Function { params, .. }) => Some(params.clone()),
+            _ => None,
+        }
+    }
+
     /// The `X.new` a `super()` in the current class must call.
     ///
     /// The parent's TypeId is often absent from this context's type table, so
