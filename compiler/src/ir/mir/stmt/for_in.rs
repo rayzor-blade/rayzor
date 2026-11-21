@@ -489,7 +489,12 @@ impl<'a> HirToMirContext<'a> {
         // Body block: reload the counter and bind it to the pattern variable.
         self.builder.switch_to_block(loop_body_block);
 
-        let Some(loop_val) = self.builder.build_load(counter_ptr, IrType::I64) else {
+        let Some(counter) = self.builder.build_load(counter_ptr, IrType::I64) else {
+            self.loop_stack.pop();
+            return;
+        };
+        // A range yields Int: the variable is the counter's 32-bit value.
+        let Some(loop_val) = self.builder.build_cast(counter, IrType::I64, IrType::I32) else {
             self.loop_stack.pop();
             return;
         };
