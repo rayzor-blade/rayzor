@@ -263,8 +263,11 @@ impl<'a> HirToMirContext<'a> {
             collection, collection_type
         );
 
+        // `Null<Array<T>>` iterates as the array it holds.
+        let iterated = self.resolve_storage_type(self.resolve_through_aliases(iter_expr.ty));
         let elem_type_id = self
-            .get_array_element_type(iter_expr.ty)
+            .get_array_element_type(iterated)
+            .or_else(|| self.get_array_element_type(iter_expr.ty))
             .unwrap_or(iter_expr.ty);
         debug!(
             "[for-in]: array_type={:?}, elem_type={:?}",
