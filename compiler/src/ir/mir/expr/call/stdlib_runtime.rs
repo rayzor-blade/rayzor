@@ -1837,6 +1837,20 @@ impl<'a> HirToMirContext<'a> {
                     .cloned()
                     .unwrap_or_else(|| actual_ty.clone());
 
+                // A Dynamic handed to a String parameter is its box: open it.
+                let string_param = matches!(expected_ty, IrType::String)
+                    || matches!(&expected_ty, IrType::Ptr(inner) if **inner == IrType::String);
+                if string_param
+                    && matches!(
+                        self.type_table.get(arg.ty).map(|t| &t.kind),
+                        Some(TypeKind::Dynamic)
+                    )
+                    && let Some(opened) =
+                        self.maybe_unbox_value(arg_reg, arg.ty, self.type_table.string_type())
+                {
+                    arg_reg = opened;
+                }
+
                 // Auto-box if needed (Int -> Ptr(U8) for Deque<Int>.add()).
                 let final_reg = match self
                     .box_for_runtime_dynamic_param(
