@@ -1171,6 +1171,39 @@ impl<'a> HirToMirContext<'a> {
                 let zero = self.builder.build_const(IrValue::I64(0))?;
                 self.builder.build_cmp(CompareOp::Ne, result_i64, zero)
             }
+            // An interface value narrows by the object it wraps.
+            (
+                Some(TypeKind::Interface { .. }),
+                Some(TypeKind::Class { .. } | TypeKind::Interface { .. }),
+            ) => {
+                let value_reg = self.lower_expression(expr)?;
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                let identity = self.get_or_register_extern_function(
+                    "haxe_iface_identity",
+                    vec![ptr_u8.clone()],
+                    ptr_u8.clone(),
+                );
+                let handle = self.coerce_reg_to(value_reg, &ptr_u8)?;
+                let object =
+                    self.builder
+                        .build_call_direct(identity, vec![handle], ptr_u8.clone())?;
+                let object = self.builder.build_bitcast(object, ptr_void.clone())?;
+                let target_type_id = self.runtime_type_id(*expected) as i64;
+                let type_id_const = self.builder.build_const(IrValue::I64(target_type_id))?;
+                let is_func = self.get_or_register_extern_function(
+                    "haxe_object_is_instance",
+                    vec![ptr_void, IrType::I64],
+                    IrType::I64,
+                );
+                let result_i64 = self.builder.build_call_direct(
+                    is_func,
+                    vec![object, type_id_const],
+                    IrType::I64,
+                )?;
+                let zero = self.builder.build_const(IrValue::I64(0))?;
+                self.builder.build_cmp(CompareOp::Ne, result_i64, zero)
+            }
             // Class vs primitive or other unrelated → false
             (Some(TypeKind::Class { .. }), Some(TypeKind::Int))
             | (Some(TypeKind::Class { .. }), Some(TypeKind::Float))
