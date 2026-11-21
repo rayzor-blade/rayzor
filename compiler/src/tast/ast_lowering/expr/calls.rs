@@ -2460,8 +2460,77 @@ impl<'a> AstLowering<'a> {
                 })
             });
         }
+        // With a concrete expected type, a conversion's type parameters bind
+        // from it: `Signal<Dynamic>` at `IntoReactive<Dynamic>` is
+        // `fromState(Signal<T>)` with T = Dynamic, which a catch-all
+        // `fromConst(val:T)` before it must not take.
+        let concrete_formal =
+            !self.type_mentions_type_param(&self.context.type_table.borrow(), formal_ty);
+        let exact = concrete_formal
+            .then(|| {
+                candidates.iter().find(|(method, param_ty)| {
+                    let bare = matches!(
+                        self.context
+                            .type_table
+                            .borrow()
+                            .get(*param_ty)
+                            .map(|t| &t.kind),
+                        Some(TypeKind::TypeParameter { .. })
+                    );
+                    if bare {
+                        return false;
+                    }
+                    let result = {
+                        let table = self.context.type_table.borrow();
+                        self.context
+                            .symbol_table
+                            .get_symbol(*method)
+                            .and_then(|symbol| table.get(symbol.type_id))
+                            .and_then(|ty| match ty.kind {
+                                TypeKind::Function { return_type, .. } => Some(return_type),
+                                _ => None,
+                            })
+                    };
+                    let Some(result) = result else {
+                        return false;
+                    };
+                    // Each parameter the result names takes the expected type's
+                    // argument, Dynamic included, which unification skips.
+                    let bindings: Vec<(SymbolId, TypeId)> = {
+                        let table = self.context.type_table.borrow();
+                        let args_of = |ty: TypeId| match table.get(ty).map(|t| &t.kind) {
+                            Some(TypeKind::Abstract {
+                                symbol_id,
+                                type_args,
+                                ..
+                            }) => Some((*symbol_id, type_args.clone())),
+                            _ => None,
+                        };
+                        match (args_of(result), args_of(formal_ty)) {
+                            (Some((r, rs)), Some((f, fs))) if r == f && rs.len() == fs.len() => rs
+                                .iter()
+                                .zip(&fs)
+                                .filter_map(|(r, f)| match table.get(*r).map(|t| &t.kind) {
+                                    Some(TypeKind::TypeParameter { symbol_id, .. }) => {
+                                        Some((*symbol_id, *f))
+                                    }
+                                    _ => None,
+                                })
+                                .collect(),
+                            _ => Vec::new(),
+                        }
+                    };
+                    if bindings.is_empty() {
+                        return false;
+                    }
+                    let source = self.substitute_alias_args(*param_ty, &bindings);
+                    self.same_type(source, arg.expr_type)
+                })
+            })
+            .flatten()
+            .map(|&(method, _)| method);
         // Bind generic source parameters before checking the conversion's source.
-        let pick = {
+        let pick = exact.or({
             candidates
                 .iter()
                 .find(|(method, param_ty)| {
@@ -2613,7 +2682,7 @@ impl<'a> AstLowering<'a> {
                     }
                 })
                 .map(|&(method_symbol, _)| method_symbol)
-        };
+        });
         let Some(method_symbol) = pick else {
             return arg;
         };
