@@ -1,0 +1,5 @@
+[project]
+name = "structure-extension-lowered-early"
+entry = "./StructureExtensionLoweredEarly.hx"
+[build]
+class-paths = ["."]

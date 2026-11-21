@@ -923,6 +923,11 @@ impl CompilationUnit {
             return Ok(typed_file);
         }
 
+        // `> A` extensions typed before A's fields were known.
+        self.type_table
+            .borrow_mut()
+            .merge_structural_intersections();
+
         // Lower to HIR — pass loaded stdlib typed files so cross-file
         // static inline var references can be resolved
         use crate::ir::tast_to_hir::lower_tast_to_hir_with_imports;

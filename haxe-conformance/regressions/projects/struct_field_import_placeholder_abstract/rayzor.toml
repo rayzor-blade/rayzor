@@ -1,0 +1,5 @@
+[project]
+name = "struct-field-import-placeholder-abstract"
+entry = "./StructFieldImportPlaceholderAbstract.hx"
+[build]
+class-paths = ["."]

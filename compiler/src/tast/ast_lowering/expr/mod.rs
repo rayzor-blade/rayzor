@@ -4556,6 +4556,9 @@ impl<'a> AstLowering<'a> {
                 Some(TypeKind::Anonymous { fields }) => return Some(fields.clone()),
                 Some(TypeKind::TypeAlias { target_type, .. }) => ty = *target_type,
                 Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                Some(TypeKind::Intersection { types }) => {
+                    return tt.merged_intersection_fields(types);
+                }
                 Some(TypeKind::Class { symbol_id, .. }) => {
                     let resolved = tt.resolve_type_alias(*symbol_id);
                     if resolved == ty || resolved == tt.dynamic_type() {

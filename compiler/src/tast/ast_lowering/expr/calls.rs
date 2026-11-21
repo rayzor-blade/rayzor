@@ -2335,6 +2335,15 @@ impl<'a> AstLowering<'a> {
                     Some(TypeKind::TypeAlias { target_type, .. }) => resolved = *target_type,
                     Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
                     Some(TypeKind::Abstract { symbol_id, .. }) => break Some(*symbol_id),
+                    // A type written before its module declared the symbol an abstract.
+                    Some(TypeKind::Class { symbol_id, .. }) => {
+                        break self
+                            .context
+                            .symbol_table
+                            .get_symbol(*symbol_id)
+                            .is_some_and(|s| s.kind == crate::tast::symbols::SymbolKind::Abstract)
+                            .then_some(*symbol_id);
+                    }
                     _ => break None,
                 }
             }

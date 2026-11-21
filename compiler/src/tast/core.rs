@@ -496,6 +496,9 @@ pub struct TypeTable {
     /// Qualified forward references still waiting for their declaration, by name.
     pending_placeholders: Vec<(String, TypeId)>,
 
+    /// Intersections not yet merged into the structure they denote.
+    unmerged_intersections: Vec<TypeId>,
+
     /// Generic instances cache for performance
     generic_cache: BTreeMap<(TypeId, Vec<TypeId>), TypeId>,
 
@@ -640,6 +643,7 @@ impl TypeTable {
             field_access: BTreeMap::new(),
             placeholder_targets: BTreeMap::new(),
             pending_placeholders: Vec::new(),
+            unmerged_intersections: Vec::new(),
             usage_stats,
             string_interner: StringInterner::new(),
             type_cache: Rc::new(TypeCache::new()),
@@ -693,6 +697,7 @@ impl TypeTable {
             field_access: BTreeMap::new(),
             placeholder_targets: BTreeMap::new(),
             pending_placeholders: Vec::new(),
+            unmerged_intersections: Vec::new(),
             usage_stats,
             string_interner: StringInterner::new(),
             type_cache: Rc::new(TypeCache::new()),
@@ -861,6 +866,9 @@ impl TypeTable {
 
         // Initialize usage stats
         self.usage_stats.insert(type_id, TypeUsageStats::default());
+        if matches!(static_type_ref.kind, TypeKind::Intersection { .. }) {
+            self.unmerged_intersections.push(type_id);
+        }
 
         type_id
     }
@@ -1497,6 +1505,77 @@ impl TypeTable {
         let dynamic = self.dynamic_type();
         self.type_cache.insert(cache_key, dynamic);
         dynamic
+    }
+
+    /// The fields of structure `ty`, through aliases and structural
+    /// intersections; `None` when `ty` is not (yet) a structure.
+    pub fn structure_fields_of(&self, ty: TypeId) -> Option<Vec<AnonymousField>> {
+        let mut ty = ty;
+        for _ in 0..8 {
+            match &self.get(ty)?.kind {
+                TypeKind::Anonymous { fields } => return Some(fields.clone()),
+                TypeKind::TypeAlias { target_type, .. } => ty = *target_type,
+                TypeKind::Optional { inner_type } => ty = *inner_type,
+                TypeKind::Intersection { types } => {
+                    return self.merged_intersection_fields(types);
+                }
+                TypeKind::Class { symbol_id, .. } => {
+                    let resolved = self.resolve_type_alias(*symbol_id);
+                    if resolved == ty || resolved == self.dynamic_type() {
+                        return None;
+                    }
+                    ty = resolved;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// The fields of `> A, > B, { ... }`, a later member winning a shared
+    /// name; `None` unless every member is a structure.
+    pub fn merged_intersection_fields(&self, types: &[TypeId]) -> Option<Vec<AnonymousField>> {
+        let mut merged: Vec<AnonymousField> = Vec::new();
+        for &member in types {
+            for field in self.structure_fields_of(member)? {
+                match merged.iter_mut().find(|f| f.name == field.name) {
+                    Some(existing) => *existing = field,
+                    None => merged.push(field),
+                }
+            }
+        }
+        Some(merged)
+    }
+
+    /// Structural intersections lowered before a member's fields were known
+    /// become the structure they denote, so every reader agrees on its layout.
+    pub fn merge_structural_intersections(&mut self) {
+        let mut pending = Vec::new();
+        let mut unmerged = std::mem::take(&mut self.unmerged_intersections);
+        unmerged.retain(|&id| {
+            let merged = match &self.types[id.as_raw() as usize].kind {
+                TypeKind::Intersection { types } => self.merged_intersection_fields(types),
+                _ => return false,
+            };
+            match merged {
+                Some(fields) => {
+                    pending.push((id, fields));
+                    false
+                }
+                None => true,
+            }
+        });
+        self.unmerged_intersections = unmerged;
+        for (id, fields) in pending {
+            let kind = TypeKind::Anonymous { fields };
+            let location = self.types[id.as_raw() as usize].source_location.clone();
+            let kind_hash = self.hash_type_kind(&kind);
+            let redefined = self.arena.alloc(Type::with_location(id, kind, location));
+            // SAFETY: Arena ensures this reference is valid for the lifetime of TypeTable
+            let redefined: &'static Type = unsafe { std::mem::transmute(redefined) };
+            self.types[id.as_raw() as usize] = redefined;
+            self.kind_index.entry(kind_hash).or_default().push(id);
+        }
     }
 
     /// Resolve abstract type underlying with caching
