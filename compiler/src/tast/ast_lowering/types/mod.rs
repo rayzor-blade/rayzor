@@ -216,7 +216,21 @@ impl<'a> AstLowering<'a> {
                     own_private
                 } else if path.package.is_empty() && self.current_module_types.contains(&path.name)
                 {
-                    self.context.current_package.and_then(|package| {
+                    // A root-package module's type holds the root slot, unless
+                    // another package's type of the name took it: then the root
+                    // package's own entry names it.
+                    let root_module = self.context.current_package.is_none();
+                    if root_module && !self.root_slot_is_foreign_type(interned_name) {
+                        self.context
+                            .symbol_table
+                            .lookup_symbol(ScopeId::first(), interned_name)
+                            .filter(|symbol| symbol.kind.is_type())
+                            .map(|symbol| (symbol.id, symbol.kind.clone()))
+                    } else {
+                        let package = self
+                            .context
+                            .current_package
+                            .unwrap_or(crate::tast::namespace::PackageId::root());
                         self.context
                             .namespace_resolver
                             .find_symbols_by_name(interned_name, package)
@@ -224,7 +238,7 @@ impl<'a> AstLowering<'a> {
                             .find(|(owner, _)| *owner == package)
                             .and_then(|(_, id)| self.context.symbol_table.get_symbol(id))
                             .map(|symbol| (symbol.id, symbol.kind))
-                    })
+                    }
                 } else {
                     None
                 };

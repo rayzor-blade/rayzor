@@ -828,12 +828,17 @@ impl<'a> AstLowering<'a> {
                     return Ok(());
                 }
 
-                // Check if this typedef already exists in the root scope
+                // A root-package typedef aliasing a namesake (std's `Map`, `List`)
+                // shares the root slot with it; any other claims the slot from a
+                // type of a named package.
+                let aliases_namesake = matches!(&typedef_decl.type_def,
+                    parser::Type::Path { path, .. } if path.name == typedef_decl.name);
                 if self
                     .context
                     .symbol_table
                     .lookup_symbol(ScopeId::first(), typedef_name)
                     .is_some()
+                    && (aliases_namesake || !self.root_slot_is_foreign_type(typedef_name))
                 {
                     return Ok(());
                 }
