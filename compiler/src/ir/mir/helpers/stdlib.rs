@@ -813,7 +813,11 @@ impl<'a> HirToMirContext<'a> {
                 Some(TypeKind::GenericInstance { base_type, .. }) => {
                     ty = self.resolve_through_aliases(*base_type)
                 }
-                Some(TypeKind::Class { symbol_id, .. } | TypeKind::Enum { symbol_id, .. }) => {
+                Some(
+                    TypeKind::Class { symbol_id, .. }
+                    | TypeKind::Enum { symbol_id, .. }
+                    | TypeKind::Abstract { symbol_id, .. },
+                ) => {
                     return Some(*symbol_id);
                 }
                 _ => return None,
@@ -822,7 +826,7 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
-    /// Whether `ty` is a generic class or enum applied only to type parameters.
+    /// Whether `ty` is a generic class, enum or abstract applied only to type parameters.
     fn generic_args_are_parameters(&self, ty: TypeId) -> bool {
         let args = match self
             .type_table
@@ -831,7 +835,8 @@ impl<'a> HirToMirContext<'a> {
         {
             Some(TypeKind::GenericInstance { type_args, .. })
             | Some(TypeKind::Class { type_args, .. })
-            | Some(TypeKind::Enum { type_args, .. }) => type_args.clone(),
+            | Some(TypeKind::Enum { type_args, .. })
+            | Some(TypeKind::Abstract { type_args, .. }) => type_args.clone(),
             _ => return false,
         };
         !args.is_empty()
