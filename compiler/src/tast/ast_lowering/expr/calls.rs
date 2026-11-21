@@ -3510,7 +3510,16 @@ impl<'a> AstLowering<'a> {
                             .map(|p| self.substitute_bound_type_params(p, &bindings))
                             .collect::<Vec<_>>()
                     });
-                lowered[i] = Some(lower_arg(self, i, hint, &bindings)?);
+                let typed = lower_arg(self, i, hint, &bindings)?;
+                // A literal's result binds parameters a later literal's
+                // parameters name (`call(() -> "a", v -> ...)`).
+                if let Some(formal) = expected_arg_types
+                    .as_ref()
+                    .and_then(|formals| formals.get(formal_index(i)))
+                {
+                    self.bind_type_params(*formal, typed.expr_type, &mut bindings);
+                }
+                lowered[i] = Some(typed);
             }
         }
         let mut arg_exprs: Vec<TypedExpression> = lowered.into_iter().flatten().collect();
