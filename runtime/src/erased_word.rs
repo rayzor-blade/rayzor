@@ -58,6 +58,13 @@ fn decode_float(word: u64) -> f64 {
     f64::from_bits(word.wrapping_sub(DOUBLE_OFFSET))
 }
 
+/// `RAYZOR_UNBOXED_DYNAMIC=1` keeps an Int or Float word unboxed where it
+/// becomes a Dynamic. Under test: readers that do not decode words yet fail.
+fn unboxed_dynamic_scalars() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RAYZOR_UNBOXED_DYNAMIC").is_some_and(|v| v == "1"))
+}
+
 /// A scalar a Dynamic carries as its erased word instead of a box.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scalar {
@@ -144,6 +151,10 @@ pub extern "C" fn haxe_word_from_dynamic(value: *mut u8) -> u64 {
 /// The Dynamic value for a word: a scalar is boxed, a reference is itself.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_word_to_dynamic(word: u64) -> *mut u8 {
+    // An Int or Float word is its own Dynamic, unboxed, under the switch.
+    if unboxed_dynamic_scalars() && scalar_word(word as *const u8).is_some() {
+        return word as *mut u8;
+    }
     match kind(word) {
         WordKind::Reference => word as *mut u8,
         WordKind::Int => haxe_box_int_ptr(word as u32 as i32 as i64),

@@ -4358,6 +4358,10 @@ pub extern "C" fn haxe_dynamic_order(a: *mut u8, b: *mut u8) -> i32 {
 /// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Dynamic, 0=unresolved.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_equals_typed(raw: i64, type_tag: i32, other: *mut u8) -> bool {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(other as *const u8) {
+        return haxe_dynamic_equals_typed(raw, type_tag, word.ptr());
+    }
     let (raw, type_tag) = crate::erased_word::native_value(raw, type_tag);
     if type_tag == ValueTag::Interface as i32 {
         let object = haxe_iface_identity(raw as *mut u8);
@@ -4494,6 +4498,11 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
             // `Null<T>` over a reference is the reference: its null is null.
             if p.is_null() {
                 return std::ptr::null_mut();
+            }
+            // A `T` bound to Dynamic may hold an unboxed scalar word: it is
+            // already that Dynamic.
+            if crate::erased_word::scalar_word(p).is_some() {
+                return p;
             }
             // A type token or a tag-only enum's discriminant has no header.
             if (p as usize) <= u32::MAX as usize {
