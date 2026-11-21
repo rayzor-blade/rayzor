@@ -778,7 +778,7 @@ impl ReificationEngine {
                         })
                         .collect();
                     Ok(Expr {
-                        kind: ExprKind::Array(exprs?),
+                        kind: super::expr_adt::array_or_map(exprs?),
                         span,
                     })
                 }

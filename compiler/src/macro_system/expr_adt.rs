@@ -52,6 +52,34 @@ fn comprehension_entry(expression: &Expr) -> Option<(Expr, Expr)> {
     }
 }
 
+/// An array declaration whose every element is `key => value` is a map literal.
+pub(crate) fn array_or_map(items: Vec<Expr>) -> ExprKind {
+    let entries = !items.is_empty()
+        && items.iter().all(|item| {
+            matches!(
+                item.kind,
+                ExprKind::Binary {
+                    op: BinaryOp::Arrow,
+                    ..
+                }
+            )
+        });
+    if !entries {
+        return ExprKind::Array(items);
+    }
+    ExprKind::Map(
+        items
+            .into_iter()
+            .map(|item| {
+                let ExprKind::Binary { left, right, .. } = item.kind else {
+                    unreachable!()
+                };
+                (*left, *right)
+            })
+            .collect(),
+    )
+}
+
 fn comprehension_body(key: &Expr, value: &Expr) -> Expr {
     match &key.kind {
         ExprKind::If {
@@ -1466,30 +1494,8 @@ pub fn try_expr_of(v: &MacroValue, span: Span) -> Option<Expr> {
                                 expr: Box::new(body),
                             }
                         }
-                    } else if !items.is_empty()
-                        && items.iter().all(|item| {
-                            matches!(
-                                item.kind,
-                                ExprKind::Binary {
-                                    op: BinaryOp::Arrow,
-                                    ..
-                                }
-                            )
-                        })
-                    {
-                        ExprKind::Map(
-                            items
-                                .into_iter()
-                                .map(|item| {
-                                    let ExprKind::Binary { left, right, .. } = item.kind else {
-                                        unreachable!()
-                                    };
-                                    (*left, *right)
-                                })
-                                .collect(),
-                        )
                     } else {
-                        ExprKind::Array(items)
+                        array_or_map(items)
                     }
                 }
                 "ECall" => ExprKind::Call {
