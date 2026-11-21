@@ -316,17 +316,14 @@ impl<'a> AstLowering<'a> {
         None
     }
 
-    /// True for a value of an enum abstract that the current file can not name
-    /// bare: Haxe brings those in only from their own module, from inside the
-    /// abstract, or through `import pkg.Abstract` / `import pkg.Abstract.*`.
-    fn enum_abstract_value_hidden(&self, value: SymbolId) -> bool {
+    /// The enum abstract `value` is a value of: a field typed as its abstract
+    /// and declared in that abstract's scope.
+    pub(crate) fn enum_abstract_value_owner(&self, value: SymbolId) -> Option<SymbolId> {
         use crate::tast::symbols::SymbolKind;
         let symbols = &self.context.symbol_table;
-        let Some(sym) = symbols.get_symbol(value) else {
-            return false;
-        };
+        let sym = symbols.get_symbol(value)?;
         if sym.kind != SymbolKind::Field {
-            return false;
+            return None;
         }
         let owner = match self
             .context
@@ -336,21 +333,33 @@ impl<'a> AstLowering<'a> {
             .map(|t| &t.kind)
         {
             Some(TypeKind::Abstract { symbol_id, .. }) => *symbol_id,
-            _ => return false,
+            _ => return None,
         };
-        let Some(owner_sym) = symbols.get_symbol(owner) else {
-            return false;
-        };
-        if owner_sym.kind != SymbolKind::Abstract
-            || self
+        let owner_sym = symbols.get_symbol(owner)?;
+        (owner_sym.kind == SymbolKind::Abstract
+            && self
                 .context
                 .scope_tree
                 .get_scope(sym.scope_id)
                 .and_then(|s| s.name)
-                != Some(owner_sym.name)
-        {
+                == Some(owner_sym.name))
+        .then_some(owner)
+    }
+
+    /// True for a value of an enum abstract that the current file can not name
+    /// bare: Haxe brings those in only from their own module, from inside the
+    /// abstract, or through `import pkg.Abstract` / `import pkg.Abstract.*`.
+    fn enum_abstract_value_hidden(&self, value: SymbolId) -> bool {
+        let symbols = &self.context.symbol_table;
+        let Some(sym) = symbols.get_symbol(value) else {
             return false;
-        }
+        };
+        let Some(owner) = self.enum_abstract_value_owner(value) else {
+            return false;
+        };
+        let Some(owner_sym) = symbols.get_symbol(owner) else {
+            return false;
+        };
         if self.module_enum_abstract_values.get(&sym.name) == Some(&value)
             || self.context.class_context_stack.contains(&owner)
         {
@@ -1053,8 +1062,8 @@ impl<'a> AstLowering<'a> {
     }
 
     /// The same-named constructor of the enum `expected` names, when the
-    /// scope walk picked `variant` of a different enum, or a type of that
-    /// name. Haxe resolves a bare constructor against the expected type
+    /// scope walk picked `variant` of a different enum, a type of that name,
+    /// or an enum abstract's value of that name. Haxe resolves a bare constructor against the expected type
     /// before the scope.
     pub(crate) fn expected_enum_variant(
         &self,
@@ -1071,7 +1080,8 @@ impl<'a> AstLowering<'a> {
                 | SymbolKind::Interface
                 | SymbolKind::Abstract
                 | SymbolKind::TypeAlias
-        ) {
+        ) && self.enum_abstract_value_owner(variant).is_none()
+        {
             return None;
         }
         let name = sym.name;
