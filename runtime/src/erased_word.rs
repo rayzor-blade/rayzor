@@ -58,6 +58,62 @@ fn decode_float(word: u64) -> f64 {
     f64::from_bits(word.wrapping_sub(DOUBLE_OFFSET))
 }
 
+/// A scalar a Dynamic carries as its erased word instead of a box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Scalar {
+    Int(i32),
+    Float(f64),
+}
+
+/// The scalar a Dynamic slot holds as its word: an Int or a Float word. A
+/// sign-extended raw integer (top bits 0xFFFF) is none: no Float word has
+/// them. Bool words are left out: 6 and 7 are also small raw integers.
+pub fn scalar_word(p: *const u8) -> Option<Scalar> {
+    let word = p as u64;
+    if word & TOP == TOP {
+        return None;
+    }
+    match kind(word) {
+        WordKind::Int => Some(Scalar::Int(word as u32 as i32)),
+        WordKind::Float => Some(Scalar::Float(decode_float(word))),
+        WordKind::Reference | WordKind::Bool => None,
+    }
+}
+
+/// A scalar word seen as a Dynamic box for the length of one reader call.
+/// The box and its payload live on the caller's stack, so nothing is
+/// allocated and nothing needs freeing; a reader must not keep the pointer.
+#[repr(C)]
+pub(crate) struct WordBox {
+    type_id: u32,
+    // Zero: a stack box carries no erased or reference box mark.
+    mark: u32,
+    value_ptr: *mut u8,
+    payload: u64,
+}
+
+impl WordBox {
+    /// The box for `p` when it is an Int or Float word.
+    pub(crate) fn of(p: *const u8) -> Option<Self> {
+        let (type_id, payload) = match scalar_word(p)? {
+            Scalar::Int(i) => (TYPE_INT, i as i64 as u64),
+            Scalar::Float(f) => (TYPE_FLOAT, f.to_bits()),
+        };
+        Some(Self {
+            type_id: type_id.0,
+            mark: 0,
+            value_ptr: std::ptr::null_mut(),
+            payload,
+        })
+    }
+
+    /// The box's address, as a Dynamic reader takes it.
+    pub(crate) fn ptr(&mut self) -> *mut u8 {
+        self.value_ptr = &mut self.payload as *mut u64 as *mut u8;
+        self as *mut Self as *mut u8
+    }
+}
+
 /// A scalar in a Dynamic box, if `p` is one.
 fn boxed_scalar(p: *mut u8) -> Option<(TypeId, *mut u8)> {
     if p.is_null() {

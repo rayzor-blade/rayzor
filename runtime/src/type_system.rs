@@ -2216,6 +2216,10 @@ pub unsafe extern "C" fn haxe_object_free_deep(ptr: *mut u8) {
 /// Used by `Std.is()` and `(expr is Type)` for Dynamic-typed values.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_is(value_ptr: *mut u8, expected_type_id: i64) -> bool {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(value_ptr as *const u8) {
+        return haxe_std_is(word.ptr(), expected_type_id);
+    }
     if value_ptr.is_null() {
         return false;
     }
@@ -3146,6 +3150,10 @@ pub extern "C" fn haxe_std_string(dynamic: DynamicValue) -> StringPtr {
 /// Returns *mut HaxeString for proper ABI compatibility
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_string::HaxeString {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(dynamic_ptr as *const u8) {
+        return haxe_std_string_ptr(word.ptr());
+    }
     use crate::haxe_string::HaxeString;
 
     if dynamic_ptr.is_null() {
@@ -3811,6 +3819,10 @@ pub extern "C" fn haxe_box_function_ptr(fn_ptr: *mut u8) -> *mut u8 {
 /// Unbox an Int from Dynamic (takes opaque pointer to DynamicValue)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_int_ptr(ptr: *mut u8) -> i64 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(ptr as *const u8) {
+        return haxe_unbox_int_ptr(word.ptr());
+    }
     if ptr.is_null() {
         return 0;
     }
@@ -3832,6 +3844,10 @@ pub extern "C" fn haxe_unbox_int_ptr(ptr: *mut u8) -> i64 {
 /// This handles the ambiguity between boxed DynamicValue* and type-erased raw integers.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_coerce_dynamic_to_int(ptr: *mut u8) -> i64 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(ptr as *const u8) {
+        return haxe_coerce_dynamic_to_int(word.ptr());
+    }
     if ptr.is_null() {
         return 0;
     }
@@ -4090,6 +4106,10 @@ pub extern "C" fn haxe_adapt_generic_value(
 /// Same heuristic as haxe_coerce_dynamic_to_int.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_coerce_dynamic_to_float(ptr: *mut u8) -> f64 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(ptr as *const u8) {
+        return haxe_coerce_dynamic_to_float(word.ptr());
+    }
     if ptr.is_null() {
         return 0.0;
     }
@@ -4102,6 +4122,10 @@ pub extern "C" fn haxe_coerce_dynamic_to_float(ptr: *mut u8) -> f64 {
 /// Unbox a Float from Dynamic (takes opaque pointer to DynamicValue)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_float_ptr(ptr: *mut u8) -> f64 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(ptr as *const u8) {
+        return haxe_unbox_float_ptr(word.ptr());
+    }
     if ptr.is_null() {
         return 0.0;
     }
@@ -4153,6 +4177,13 @@ pub(crate) fn dynamic_value_if_boxed(p: *mut u8) -> Option<DynamicValue> {
 /// are equal; null is equal to nothing else.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_dynamic_equals(a: *mut u8, b: *mut u8) -> bool {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(a as *const u8) {
+        return haxe_dynamic_equals(word.ptr(), b);
+    }
+    if let Some(mut word) = crate::erased_word::WordBox::of(b as *const u8) {
+        return haxe_dynamic_equals(a, word.ptr());
+    }
     if a == b {
         return true;
     }
@@ -4395,6 +4426,10 @@ pub extern "C" fn haxe_dynamic_equals_typed(raw: i64, type_tag: i32, other: *mut
 /// Unbox a Bool from Dynamic (takes opaque pointer to DynamicValue)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_bool_ptr(ptr: *mut u8) -> bool {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(ptr as *const u8) {
+        return haxe_unbox_bool_ptr(word.ptr());
+    }
     if ptr.is_null() {
         return false;
     }

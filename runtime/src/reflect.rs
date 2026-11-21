@@ -830,6 +830,13 @@ pub extern "C" fn haxe_reflect_copy(obj: *mut u8) -> *mut u8 {
 /// Both arguments are DynamicValue pointers (boxed values).
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(a as *const u8) {
+        return haxe_reflect_compare(word.ptr(), b);
+    }
+    if let Some(mut word) = crate::erased_word::WordBox::of(b as *const u8) {
+        return haxe_reflect_compare(a, word.ptr());
+    }
     if a.is_null() && b.is_null() {
         return 0;
     }
@@ -1103,6 +1110,10 @@ pub(crate) fn type_token_id(value: i64) -> Option<u32> {
 /// Check a value against a class or enum token held in a Dynamic slot.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_std_is_dynamic_type(value: *mut u8, expected_token: i64) -> bool {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(value as *const u8) {
+        return haxe_std_is_dynamic_type(word.ptr(), expected_token);
+    }
     let Some(expected_id) = type_token_id(expected_token) else {
         return false;
     };
@@ -1303,6 +1314,10 @@ fn valuetype_tenum(type_id: i64) -> i64 {
 ///          TFunction=5, TClass=6, TEnum=7, TUnknown=8)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(v as *const u8) {
+        return haxe_type_typeof(word.ptr());
+    }
     if v.is_null() {
         return TVALUETYPE_TNULL;
     }
@@ -1379,6 +1394,10 @@ pub extern "C" fn haxe_type_typeof_int64() -> i64 {
 /// compiler lowering to request a real enum value when needed.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_type_typeof_value(v: *mut u8) -> i64 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(v as *const u8) {
+        return haxe_type_typeof_value(word.ptr());
+    }
     let tag = haxe_type_typeof(v);
     match tag {
         TVALUETYPE_TCLASS => {
