@@ -470,9 +470,10 @@ impl<'a> HirToMirContext<'a> {
             // User class with toString() in HIR — look up compiled function
             if let Some(tostring_id) = self.function_map.get(&tostring_symbol).copied() {
                 let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
-                let string_reg =
-                    self.builder
-                        .build_call_direct(tostring_id, vec![obj_reg], string_ptr_ty)?;
+                let string_reg = self.unless_null_string(obj_reg, |this| {
+                    this.builder
+                        .build_call_direct(tostring_id, vec![obj_reg], string_ptr_ty)
+                })?;
                 return Some(Some(string_reg));
             }
         }
@@ -561,17 +562,53 @@ impl<'a> HirToMirContext<'a> {
             .map(|&arg| self.convert_type_arg(arg))
             .collect();
         let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
-        if type_args.is_empty() {
-            self.builder
-                .build_call_direct(func_id, vec![obj_reg], string_ptr_ty)
-        } else {
-            self.builder.build_call_direct_with_type_args(
-                func_id,
-                vec![obj_reg],
-                string_ptr_ty,
-                type_args,
-            )
+        self.unless_null_string(obj_reg, |this| {
+            if type_args.is_empty() {
+                this.builder
+                    .build_call_direct(func_id, vec![obj_reg], string_ptr_ty)
+            } else {
+                this.builder.build_call_direct_with_type_args(
+                    func_id,
+                    vec![obj_reg],
+                    string_ptr_ty,
+                    type_args,
+                )
+            }
+        })
+    }
+
+    /// `"null"` for a null reference `obj`, else the string `render` builds,
+    /// which runs only on a live object.
+    fn unless_null_string(
+        &mut self,
+        obj: IrId,
+        render: impl FnOnce(&mut Self) -> Option<IrId>,
+    ) -> Option<IrId> {
+        if !matches!(self.builder.get_register_type(obj), Some(IrType::Ptr(_))) {
+            return render(self);
         }
+        let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+        let bits = self.builder.build_bitcast(obj, IrType::I64)?;
+        let zero = self.builder.build_const(IrValue::I64(0))?;
+        let is_null = self.builder.build_cmp(CompareOp::Eq, bits, zero)?;
+        let live = self.builder.create_block()?;
+        let absent = self.builder.create_block()?;
+        let merge = self.builder.create_block()?;
+        self.builder.build_cond_branch(is_null, absent, live)?;
+        self.builder.switch_to_block(live);
+        let rendered = render(self)?;
+        let rendered_end = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
+        self.builder.switch_to_block(absent);
+        let text = self.builder.build_const(IrValue::String("null".into()))?;
+        let text = self.builder.build_bitcast(text, string_ptr_ty.clone())?;
+        self.builder.build_branch(merge)?;
+        self.builder.switch_to_block(merge);
+        let joined = self.builder.build_phi(merge, string_ptr_ty)?;
+        self.builder
+            .add_phi_incoming(merge, joined, rendered_end, rendered)?;
+        self.builder.add_phi_incoming(merge, joined, absent, text)?;
+        Some(joined)
     }
 
     /// Try to apply an abstract @:from conversion in a Cast expression.

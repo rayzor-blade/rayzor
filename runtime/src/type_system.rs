@@ -3179,6 +3179,11 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
     let Some(dynamic) = dynamic_box_at(dynamic_ptr) else {
         return crate::haxe_sys::haxe_string_from_int(dynamic_ptr as usize as i64);
     };
+    // A raw class instance is itself: read as a box, an instance with no
+    // fields would be a class box holding null.
+    if is_raw_class_instance(dynamic_ptr) {
+        return class_instance_to_string(dynamic.type_id.0, dynamic_ptr);
+    }
 
     // An `Iterable` built over an array prints as that array.
     if let Some((array, boxed)) = crate::iter_handle::handle_array_source(dynamic_ptr) {
