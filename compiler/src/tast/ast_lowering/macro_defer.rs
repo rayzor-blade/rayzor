@@ -2126,6 +2126,29 @@ impl MacroTyper for DeferredMacroTyper<'_, '_> {
                 }
             }
         }
+        // A qualified name is that type, not a loaded type sharing its last
+        // segment (`ashui.ui.Input` is not `haxe.io.Input` before its module loads).
+        if name.contains('.')
+            && name
+                .chars()
+                .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.'))
+            && let Some(qualified) = type_qualified_name(self.lowering, id)
+        {
+            let segments: Vec<&str> = name.split('.').collect();
+            // `pkg.Module.Type` names a subtype registered as `pkg.Type`.
+            let module_subtype = segments.len() >= 3
+                && segments[segments.len() - 2].starts_with(|c: char| c.is_ascii_uppercase())
+                && qualified
+                    == [
+                        &segments[..segments.len() - 2],
+                        &segments[segments.len() - 1..],
+                    ]
+                    .concat()
+                    .join(".");
+            if qualified != name && !module_subtype {
+                return Err(format!("Type not found: {name}"));
+            }
+        }
         Ok(with_unknown_parameters(
             self.lowering.context.type_table,
             id,
@@ -3958,4 +3981,35 @@ fn dead_end(e: &parser::Expr) -> Flow {
             first(&children)
         }
     }
+}
+
+/// The qualified name of the class, interface, enum, abstract or typedef `id` is.
+fn type_qualified_name(lowering: &AstLowering<'_>, id: TypeId) -> Option<String> {
+    let symbol = lowering.resolve_type_to_class_symbol(id).or_else(|| {
+        match lowering
+            .context
+            .type_table
+            .borrow()
+            .get(id)
+            .map(|t| &t.kind)
+        {
+            Some(
+                crate::tast::TypeKind::Enum { symbol_id, .. }
+                | crate::tast::TypeKind::Abstract { symbol_id, .. }
+                | crate::tast::TypeKind::TypeAlias { symbol_id, .. },
+            ) => Some(*symbol_id),
+            _ => None,
+        }
+    })?;
+    let qualified = lowering
+        .context
+        .symbol_table
+        .get_symbol(symbol)?
+        .qualified_name?;
+    lowering
+        .context
+        .string_interner
+        .get(qualified)
+        .filter(|q| q.contains('.'))
+        .map(str::to_string)
 }

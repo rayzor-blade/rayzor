@@ -1,0 +1,5 @@
+[project]
+name = "get-type-qualified-not-loaded"
+entry = "./GetTypeQualifiedNotLoaded.hx"
+[build]
+class-paths = ["."]
