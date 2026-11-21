@@ -2275,6 +2275,21 @@ impl<'a> AstLowering<'a> {
         let Some(formal_ty) = formal else {
             return arg;
         };
+        // `Null<A>` converts as `A` does; a `null` stays null.
+        let nullable_abstract = {
+            let tt = self.context.type_table.borrow();
+            match tt.get(formal_ty).map(|ti| &ti.kind) {
+                Some(TypeKind::Optional { inner_type }) => Some(*inner_type),
+                _ => None,
+            }
+        }
+        .filter(|inner| self.abstract_symbol_of(*inner).is_some());
+        if let Some(inner) = nullable_abstract {
+            if matches!(arg.kind, TypedExpressionKind::Null) {
+                return arg;
+            }
+            return self.coerce_arg_via_abstract_from(arg, Some(inner));
+        }
         // A conditional converts arm by arm: one arm may already be the
         // abstract while the other needs its `@:from`.
         if matches!(arg.kind, TypedExpressionKind::Conditional { .. })
@@ -2364,6 +2379,7 @@ impl<'a> AstLowering<'a> {
                 match tt.get(resolved).map(|ti| &ti.kind) {
                     Some(TypeKind::TypeAlias { target_type, .. }) => resolved = *target_type,
                     Some(TypeKind::GenericInstance { base_type, .. }) => resolved = *base_type,
+                    Some(TypeKind::Optional { inner_type }) => resolved = *inner_type,
                     Some(TypeKind::Abstract { symbol_id, .. }) => {
                         break *symbol_id == abstract_symbol;
                     }

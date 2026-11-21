@@ -1293,6 +1293,28 @@ impl<'a> AstLowering<'a> {
                 } else {
                     value_expr
                 };
+                // Into a `Null<A>` slot a value converts through A's `@:from`,
+                // as a declaration's initializer does.
+                let nullable_abstract_target = matches!(op, parser::AssignOp::Assign) && {
+                    let inner = match self
+                        .context
+                        .type_table
+                        .borrow()
+                        .get(target_expr.expr_type)
+                        .map(|t| &t.kind)
+                    {
+                        Some(crate::tast::core::TypeKind::Optional { inner_type }) => {
+                            Some(*inner_type)
+                        }
+                        _ => None,
+                    };
+                    inner.is_some_and(|inner| self.abstract_symbol_of(inner).is_some())
+                };
+                let value_expr = if nullable_abstract_target {
+                    self.coerce_arg_via_abstract_from(value_expr, Some(target_expr.expr_type))
+                } else {
+                    value_expr
+                };
 
                 // Monomorph rewrite: `var x = null` takes the type of its
                 // first plain assignment that has one (`x = null` first keeps
