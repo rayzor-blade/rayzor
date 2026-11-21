@@ -114,6 +114,7 @@ impl<'a> HirToMirContext<'a> {
                             iface_sym,
                             method_name_i,
                             &return_ir_type,
+                            expr.ty,
                         );
                         let return_type = Box::new(if word {
                             IrType::I64
@@ -130,7 +131,7 @@ impl<'a> HirToMirContext<'a> {
                             self.builder
                                 .build_call_indirect(fn_ptr, call_args, func_signature)?;
                         let call_result = if word {
-                            self.from_word(call_result, &return_ir_type)?
+                            self.word_as_type(call_result, expr.ty, &return_ir_type)?
                         } else {
                             call_result
                         };
@@ -241,8 +242,12 @@ impl<'a> HirToMirContext<'a> {
                         resolved_ret_type_id,
                         expr.source_location,
                     );
-                    let word =
-                        self.interface_slot_return_word(iface_sym, method_name_i, &return_ir_type);
+                    let word = self.interface_slot_return_word(
+                        iface_sym,
+                        method_name_i,
+                        &return_ir_type,
+                        expr.ty,
+                    );
                     let return_type = Box::new(if word {
                         IrType::I64
                     } else {
@@ -258,7 +263,7 @@ impl<'a> HirToMirContext<'a> {
                         self.builder
                             .build_call_indirect(fn_ptr, call_args, func_signature)?;
                     let call_result = if word {
-                        self.from_word(call_result, &return_ir_type)?
+                        self.word_as_type(call_result, expr.ty, &return_ir_type)?
                     } else {
                         call_result
                     };

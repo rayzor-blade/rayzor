@@ -121,6 +121,39 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// An erased result `word` read as `ty` (IR `ir`): a Dynamic or a nullable
+    /// Float or Bool takes the word's box, as a scalar word boxes and a
+    /// reference is its own Dynamic; any other type decodes as `from_word`.
+    pub(crate) fn word_as_type(&mut self, word: IrId, ty: TypeId, ir: &IrType) -> Option<IrId> {
+        if !self.word_boxes_as(ty, ir) {
+            return self.from_word(word, ir);
+        }
+        let box_fn = self.get_or_register_extern_function(
+            "haxe_word_to_dynamic",
+            vec![IrType::I64],
+            ir.clone(),
+        );
+        self.builder
+            .build_call_direct(box_fn, vec![word], ir.clone())
+    }
+
+    /// Whether a word read as `ty` (IR `ir`) is its box: `ty` is Dynamic or a
+    /// nullable Float or Bool, under word slots.
+    pub(crate) fn word_boxes_as(&self, ty: TypeId, ir: &IrType) -> bool {
+        let resolved = self.resolve_through_aliases(ty);
+        let boxed = match self.type_table.get(resolved).map(|t| &t.kind) {
+            Some(TypeKind::Dynamic) => true,
+            Some(TypeKind::Optional { inner_type }) => matches!(
+                self.type_table
+                    .get(self.resolve_through_aliases(*inner_type))
+                    .map(|t| &t.kind),
+                Some(TypeKind::Float | TypeKind::Bool)
+            ),
+            _ => false,
+        };
+        boxed && crate::debug_flags::erased_words() && matches!(ir, IrType::Ptr(_))
+    }
+
     /// The `ty` scalar an erased slot's `word` holds. Any other `ty` gets the
     /// word unchanged.
     pub(crate) fn from_word(&mut self, word: IrId, ty: &IrType) -> Option<IrId> {

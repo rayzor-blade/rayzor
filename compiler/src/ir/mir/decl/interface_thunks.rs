@@ -146,15 +146,23 @@ impl<'a> HirToMirContext<'a> {
             )
     }
 
-    /// Whether the slot's result is a word the caller decodes to `native`.
+    /// Whether the slot's result is a word the caller decodes to `native`, the
+    /// IR of `read_as`: a scalar, or the box of a Dynamic or nullable scalar.
     pub(crate) fn interface_slot_return_word(
         &self,
         interface: SymbolId,
         name: InternedString,
         native: &IrType,
+        read_as: TypeId,
     ) -> bool {
         self.interface_slot_signature(interface, name)
-            .is_some_and(|(_, result)| self.interface_slot_is_word(result, native))
+            .is_some_and(|(_, result)| {
+                self.interface_slot_is_word(result, native)
+                    || (matches!(
+                        self.type_table.get(result).map(|t| &t.kind),
+                        Some(TypeKind::TypeParameter { .. })
+                    ) && self.word_boxes_as(read_as, native))
+            })
     }
 
     pub(crate) fn prepare_interface_slot_args(
