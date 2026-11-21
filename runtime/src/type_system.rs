@@ -3184,6 +3184,9 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
     if is_raw_class_instance(dynamic_ptr) {
         return class_instance_to_string(dynamic.type_id.0, dynamic_ptr);
     }
+    if let Some(object) = interface_value_object(dynamic_ptr) {
+        return haxe_std_string_ptr(object);
+    }
 
     // An `Iterable` built over an array prints as that array.
     if let Some((array, boxed)) = crate::iter_handle::handle_array_source(dynamic_ptr) {
@@ -4464,6 +4467,10 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
             if crate::anon_object::is_anon_handle(p) {
                 return haxe_box_reference_ptr(p, crate::anon_object::TYPE_ANON_OBJECT.0);
             }
+            // An interface value boxes as the object it wraps.
+            if let Some(object) = interface_value_object(p) {
+                return haxe_box_typed_ptr(object as i64, ValueTag::Reference as i32);
+            }
             // A `T` bound to Dynamic already holds a box.
             let builtin_box = || {
                 dynamic_box_at(p).is_some_and(|d| {
@@ -5413,6 +5420,26 @@ pub extern "C" fn haxe_iface_value(ptr: *mut u8, iface_type_id: i32) -> *mut u8 
         }
     }
     ptr
+}
+
+/// The object `ptr` wraps when it is an interface value: word 0 is a class
+/// instance whose class implements an interface. None for anything else,
+/// the instance itself and a Dynamic box included.
+pub(crate) fn interface_value_object(ptr: *mut u8) -> Option<*mut u8> {
+    if dynamic_box_at(ptr).is_none() || is_reference_box(ptr) || is_raw_class_instance(ptr) {
+        return None;
+    }
+    let object = unsafe { *(ptr as *const *mut u8) };
+    if !is_raw_class_instance(object) {
+        return None;
+    }
+    let class_id = unsafe { *(object as *const u32) };
+    let registry = IFACE_VTABLE_REGISTRY.read().unwrap();
+    registry
+        .as_ref()?
+        .keys()
+        .any(|(class, _)| *class == class_id)
+        .then_some(object)
 }
 
 /// The object an interface value stands for: word 0 of a fat pointer
