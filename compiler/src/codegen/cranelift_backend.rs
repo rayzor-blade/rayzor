@@ -195,6 +195,7 @@ impl CraneliftBackend {
     /// Whether a generic function's body still depends on its type parameters.
     fn references_type_params(function: &IrFunction) -> bool {
         crate::ir::monomorphize::references_type_params(function)
+            && !crate::ir::monomorphize::template_runs_erased(function)
     }
 
     /// Create a new Cranelift backend with default optimization level (speed)

@@ -2090,6 +2090,11 @@ fn contains_type_param(ty: &IrType) -> bool {
 /// monomorphic, whatever its declaration says, and compiling it is what lets
 /// a caller reach it at all.
 pub fn references_type_params(function: &IrFunction) -> bool {
+    !function.type_param_tag_fixups.is_empty() || mentions_type_vars(function)
+}
+
+/// Whether the signature or a local is typed by a type parameter.
+fn mentions_type_vars(function: &IrFunction) -> bool {
     fn is_var(ty: &IrType) -> bool {
         match ty {
             IrType::TypeVar(_) => true,
@@ -2102,15 +2107,33 @@ pub fn references_type_params(function: &IrFunction) -> bool {
             _ => false,
         }
     }
-    if !function.type_param_tag_fixups.is_empty() {
-        return true;
-    }
-    if function.signature.parameters.iter().any(|p| is_var(&p.ty))
+    function.signature.parameters.iter().any(|p| is_var(&p.ty))
         || is_var(&function.signature.return_type)
+        || function.locals.values().any(|l| is_var(&l.ty))
+}
+
+/// Under word slots, a template tied to its type parameters only by tags that
+/// read a word runs unspecialized: a word describes itself. A class's
+/// interface thunk calls such a template, as no binding reaches it.
+pub fn template_runs_erased(function: &IrFunction) -> bool {
+    if !crate::debug_flags::erased_words()
+        || function.type_param_tag_fixups.is_empty()
+        || mentions_type_vars(function)
     {
-        return true;
+        return false;
     }
-    function.locals.values().any(|l| is_var(&l.ty))
+    let word = rayzor_runtime::type_system::ValueTag::Word as i32;
+    function.type_param_tag_fixups.iter().all(|(tag, _)| {
+        function.cfg.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    IrInstruction::Const { dest, value: IrValue::I32(v) }
+                        if dest == tag && v & 0xff == word
+                )
+            })
+        })
+    })
 }
 
 impl Monomorphizer {
@@ -2683,6 +2706,32 @@ mod tests {
         function.type_param_tag_fixups.push((tag, "C".into()));
         function.type_param_metadata_fixups.push((tag, "C".into()));
         function
+    }
+
+    /// A template whose only type-parameter tie is the tag at `tag_value`.
+    fn tagged_template(tag_value: i32) -> IrFunction {
+        let mut function = two_parameter_template();
+        function.signature.return_type = IrType::Void;
+        let tag = function.type_param_tag_fixups[0].0;
+        let entry = function.cfg.entry_block;
+        let block = function.cfg.blocks.get_mut(&entry).unwrap();
+        block.instructions.push(IrInstruction::Const {
+            dest: tag,
+            value: IrValue::I32(tag_value),
+        });
+        function
+    }
+
+    #[test]
+    fn word_tagged_template_runs_erased() {
+        if !crate::debug_flags::erased_words() {
+            return;
+        }
+        let word = rayzor_runtime::type_system::ValueTag::Word as i32;
+        assert!(template_runs_erased(&tagged_template(word)));
+        let int = rayzor_runtime::type_system::ValueTag::Int as i32;
+        assert!(!template_runs_erased(&tagged_template(int)));
+        assert!(!template_runs_erased(&two_parameter_template()));
     }
 
     #[test]
