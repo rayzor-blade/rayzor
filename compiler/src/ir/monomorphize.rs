@@ -652,7 +652,11 @@ impl Monomorphizer {
                             (source, IrType::TypeVar(name)) if slot(source) => {
                                 out.push((*id, index, WordSite::Decode, name.clone()));
                             }
-                            (Some(IrType::TypeVar(name)), IrType::I64 | IrType::U64) => {
+                            // A T viewed as a pointer is its word too.
+                            (
+                                Some(IrType::TypeVar(name)),
+                                IrType::I64 | IrType::U64 | IrType::Ptr(_),
+                            ) => {
                                 out.push((*id, index, WordSite::Encode, name.clone()));
                             }
                             _ => {}
@@ -780,15 +784,26 @@ impl Monomorphizer {
                             | IrInstruction::Cast { dest, src, .. },
                         ) => {
                             let (dest, src) = (*dest, *src);
-                            let value = if *site == WordSite::Decode {
+                            let pointer = match &instruction {
+                                IrInstruction::BitCast {
+                                    ty: ty @ IrType::Ptr(_),
+                                    ..
+                                } => Some(ty.clone()),
+                                _ => None,
+                            };
+                            let mut value = if *site == WordSite::Decode {
                                 regs.decode(decoders, &mut out, src, bound)
                             } else {
                                 encode(&mut regs, &mut out, src, bound)
                             };
-                            let ty = if *site == WordSite::Decode {
-                                bound.clone()
-                            } else {
-                                IrType::I64
+                            let ty = match (site, pointer) {
+                                (WordSite::Decode, _) => bound.clone(),
+                                // The word, still typed as the pointer it was cast to.
+                                (_, Some(pointer)) => {
+                                    value = regs.bitcast(&mut out, value, &pointer);
+                                    pointer
+                                }
+                                _ => IrType::I64,
                             };
                             regs.function().register_types.insert(dest, ty);
                             instruction = IrInstruction::Copy { dest, src: value };
