@@ -4596,6 +4596,13 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
             if crate::erased_word::scalar_word(p).is_some() {
                 return p;
             }
+            // A Bool word is no Dynamic; its box is.
+            if type_tag == ValueTag::Reference as i32
+                && crate::erased_word::unboxed_dynamic_scalars()
+                && crate::erased_word::kind(value as u64) == crate::erased_word::WordKind::Bool
+            {
+                return haxe_box_bool_ptr(crate::erased_word::haxe_word_to_bool(value as u64));
+            }
             // A type token or a tag-only enum's discriminant has no header.
             if (p as usize) <= u32::MAX as usize {
                 return box_int_heap(value);

@@ -1,0 +1,5 @@
+[project]
+name = "interface-bool-result-other-module"
+entry = "./InterfaceBoolResultOtherModule.hx"
+[build]
+class-paths = ["."]
