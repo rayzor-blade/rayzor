@@ -1841,6 +1841,22 @@ impl<'a> HirToMirContext<'a> {
             };
             return self.to_null_int(as_ptr);
         }
+        // A `Null<Float>` or `Null<Bool>` result is boxed like the Dynamic view
+        // the callee returns, so null stays null.
+        let mut nullable = call_ty;
+        for _ in 0..8 {
+            match self.type_table.get(nullable).map(|ty| &ty.kind) {
+                Some(TypeKind::TypeAlias { target_type, .. }) => nullable = *target_type,
+                Some(TypeKind::Optional { inner_type })
+                    if self.optional_inner_is_boxable_primitive(*inner_type)
+                        && !self.is_int64_type(*inner_type)
+                        && matches!(self.convert_type(call_ty), IrType::Ptr(_)) =>
+                {
+                    return Some(call_result);
+                }
+                _ => break,
+            }
+        }
         let concrete_call = {
             let mut ty = call_ty;
             for _ in 0..8 {
