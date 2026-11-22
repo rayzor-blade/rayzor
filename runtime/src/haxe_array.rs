@@ -153,8 +153,12 @@ fn word_to_slot(array: *mut HaxeArray, word: i64) -> i64 {
     }
 }
 
-/// `bits` as `arr`'s slot for a write tagged `tag`.
+/// `bits` as `arr`'s slot for a write tagged `tag`. The first write to an
+/// empty array with no layout records the element tag, whichever writer it is.
 fn encode_slot(arr: *mut HaxeArray, bits: i64, tag: i32, metadata: u64) -> i64 {
+    if unsafe { (*arr).len == 0 && stored_slot_layout(&*arr).is_none() } {
+        haxe_array_init_element_tag(arr, tag);
+    }
     if crate::erased_word::is_word_tag(tag) {
         apply_kind_hint(arr, tag);
         word_to_slot(arr, bits)
@@ -335,9 +339,6 @@ pub extern "C" fn haxe_array_push_typed(
     tag: i32,
     metadata: u64,
 ) -> i32 {
-    if !arr.is_null() && unsafe { (*arr).len == 0 && stored_slot_layout(&*arr).is_none() } {
-        haxe_array_init_element_tag(arr, tag);
-    }
     if arr.is_null() {
         return 0;
     }
