@@ -1914,8 +1914,17 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        let lhs_type = self.convert_type(lhs_ty);
-        let rhs_type = self.convert_type(rhs_ty);
+        // A float operand's width is its register's: `Single - Single` is typed
+        // Float but computed in f32.
+        let operand_type = |ctx: &Self, reg: IrId, ty: TypeId| match (
+            ctx.convert_type(ty),
+            ctx.builder.get_register_type(reg),
+        ) {
+            (IrType::F32 | IrType::F64, Some(have @ (IrType::F32 | IrType::F64))) => have,
+            (t, _) => t,
+        };
+        let lhs_type = operand_type(self, lhs_reg, lhs_ty);
+        let rhs_type = operand_type(self, rhs_reg, rhs_ty);
 
         let lhs_is_int = matches!(
             lhs_type,
