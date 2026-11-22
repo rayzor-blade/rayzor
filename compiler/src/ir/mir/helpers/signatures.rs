@@ -1354,6 +1354,51 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
+                    // A class or heap-enum formal opens only a marked reference
+                    // box, which a raw object or enum cell is not.
+                    let opens_reference_box = matches!(
+                        self.type_table.get(resolved_arg).map(|t| &t.kind),
+                        Some(TypeKind::Dynamic)
+                    ) && {
+                        let storage = self.resolve_storage_type(resolved_param);
+                        match self.type_table.get(storage).map(|t| t.kind.clone()) {
+                            Some(TypeKind::Class { .. }) => {
+                                matches!(self.convert_type(storage), IrType::Ptr(_))
+                                    && self.get_interface_symbol(storage).is_none()
+                            }
+                            Some(TypeKind::Enum { symbol_id, .. }) => self.enum_is_boxed(symbol_id),
+                            _ => false,
+                        }
+                    };
+                    if opens_reference_box {
+                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                        let open = self.get_or_register_extern_function(
+                            "haxe_open_reference_box",
+                            vec![ptr_u8.clone()],
+                            ptr_u8.clone(),
+                        );
+                        let reg_ty = self
+                            .builder
+                            .get_register_type(arg_reg)
+                            .unwrap_or(ptr_u8.clone());
+                        let as_ptr = if reg_ty == ptr_u8 {
+                            Some(arg_reg)
+                        } else {
+                            self.builder.build_bitcast(arg_reg, ptr_u8.clone())
+                        };
+                        if let Some(opened) = as_ptr.and_then(|p| {
+                            self.builder
+                                .build_call_direct(open, vec![p], ptr_u8.clone())
+                        }) {
+                            let formal_ir = self.convert_type(param_type_id);
+                            if formal_ir == ptr_u8 {
+                                return opened;
+                            }
+                            if let Some(cast) = self.builder.build_bitcast(opened, formal_ir) {
+                                return cast;
+                            }
+                        }
+                    }
 
                     let param_is_anon = {
                         let type_table = self.type_table;

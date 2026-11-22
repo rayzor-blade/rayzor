@@ -1252,6 +1252,10 @@ register_symbol!(
     crate::type_system::haxe_unbox_reference_ptr
 );
 register_symbol!(
+    "haxe_open_reference_box",
+    crate::type_system::haxe_open_reference_box
+);
+register_symbol!(
     "haxe_unbox_type_handle",
     crate::type_system::haxe_unbox_type_handle
 );

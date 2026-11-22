@@ -4714,6 +4714,17 @@ pub extern "C" fn haxe_box_array_ptr(value_ptr: *mut u8, slot_layout: u64) -> *m
     boxed
 }
 
+/// A reference box's payload; any other value, a raw object or enum cell
+/// included, as it came.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_open_reference_box(ptr: *mut u8) -> *mut u8 {
+    if is_reference_box(ptr) {
+        unsafe { *(ptr as *const *mut u8).add(1) }
+    } else {
+        ptr
+    }
+}
+
 /// Unbox a reference type - just extract the pointer
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_reference_ptr(ptr: *mut u8) -> *mut u8 {
