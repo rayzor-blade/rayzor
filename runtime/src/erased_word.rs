@@ -58,11 +58,15 @@ fn decode_float(word: u64) -> f64 {
     f64::from_bits(word.wrapping_sub(DOUBLE_OFFSET))
 }
 
-/// `RAYZOR_UNBOXED_DYNAMIC=1` keeps an Int or Float word unboxed where it
-/// becomes a Dynamic. Under test: readers that do not decode words yet fail.
+/// An Int or Float becomes a Dynamic as its word, with no box. On with erased
+/// words, which raw slots (`RAYZOR_ERASED_WORDS=0`) cannot carry;
+/// `RAYZOR_UNBOXED_DYNAMIC=0` boxes them instead, safe to run with.
 pub(crate) fn unboxed_dynamic_scalars() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("RAYZOR_UNBOXED_DYNAMIC").is_some_and(|v| v == "1"))
+    *ON.get_or_init(|| {
+        let off = |name| std::env::var_os(name).is_some_and(|v| v == "0");
+        !off("RAYZOR_UNBOXED_DYNAMIC") && !off("RAYZOR_ERASED_WORDS")
+    })
 }
 
 /// A scalar a Dynamic carries as its erased word instead of a box.
