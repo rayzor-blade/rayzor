@@ -252,9 +252,17 @@ impl<'a> AstLowering<'a> {
     /// `expected_float`, when the context expects Float elements; among Int
     /// and Single values only, they widen to Single.
     fn widen_ints(&self, mut values: Vec<&mut TypedExpression>, expected_float: bool) {
+        // Each value's type seen through typedefs, so `typedef Px = Float` counts as Float.
+        let resolved: Vec<TypeId> = {
+            let tt = self.context.type_table.borrow();
+            values
+                .iter()
+                .map(|e| tt.resolve_alias_type(e.expr_type))
+                .collect()
+        };
         let (int_t, float_t, single_t) = {
             let tt = self.context.type_table.borrow();
-            let single = values.iter().map(|e| e.expr_type).find(|&ty| {
+            let single = resolved.iter().copied().find(|&ty| {
                 matches!(
                     tt.get(ty).map(|t| &t.kind),
                     Some(TypeKind::Abstract { symbol_id, .. })
@@ -265,20 +273,21 @@ impl<'a> AstLowering<'a> {
             });
             (tt.int_type(), tt.float_type(), single)
         };
-        let float_t = if expected_float || values.iter().any(|e| e.expr_type == float_t) {
+        let float_t = if expected_float || resolved.contains(&float_t) {
             float_t
         } else if let Some(single_t) = single_t {
             single_t
         } else {
             return;
         };
-        if !values
-            .iter()
-            .all(|e| e.expr_type == float_t || e.expr_type == int_t)
-        {
+        if !resolved.iter().all(|&t| t == float_t || t == int_t) {
             return;
         }
-        for e in values.iter_mut().filter(|e| e.expr_type == int_t) {
+        for (e, _) in values
+            .iter_mut()
+            .zip(&resolved)
+            .filter(|(_, t)| **t == int_t)
+        {
             let widened = match e.kind {
                 TypedExpressionKind::Literal {
                     value: LiteralValue::Int(n),
