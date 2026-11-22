@@ -1,0 +1,5 @@
+[project]
+name = "receiver-fixes-class-param"
+entry = "./ReceiverFixesClassParam.hx"
+[build]
+class-paths = ["."]

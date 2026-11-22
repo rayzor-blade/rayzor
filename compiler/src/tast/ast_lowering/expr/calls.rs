@@ -2688,8 +2688,12 @@ impl<'a> AstLowering<'a> {
         };
         let location = arg.source_location.clone();
         let arguments = vec![arg];
-        let type_arguments =
-            self.infer_call_type_arguments_with_result(method_symbol, &arguments, Some(formal_ty));
+        let type_arguments = self.infer_call_type_arguments_with_result(
+            method_symbol,
+            &arguments,
+            Some(formal_ty),
+            None,
+        );
         let declared_return = self
             .context
             .symbol_table
@@ -4954,8 +4958,11 @@ impl<'a> AstLowering<'a> {
                         // No static extension found, use regular method call
                         let mut arg_exprs = arg_exprs;
                         self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
-                        let type_arguments =
-                            self.infer_call_type_arguments(method_symbol, &arg_exprs);
+                        let type_arguments = self.infer_method_type_arguments(
+                            method_symbol,
+                            &arg_exprs,
+                            receiver_expr.expr_type,
+                        );
                         self.coerce_inferred_call_arguments(
                             method_symbol,
                             &type_arguments,
@@ -5002,7 +5009,11 @@ impl<'a> AstLowering<'a> {
                         }
                     }
                     self.unify_dynamic_arguments(method_symbol, &mut arg_exprs);
-                    let type_arguments = self.infer_call_type_arguments(method_symbol, &arg_exprs);
+                    let type_arguments = self.infer_method_type_arguments(
+                        method_symbol,
+                        &arg_exprs,
+                        receiver_expr.expr_type,
+                    );
                     self.coerce_inferred_call_arguments(
                         method_symbol,
                         &type_arguments,
@@ -5433,9 +5444,15 @@ impl<'a> AstLowering<'a> {
                     TypedExpressionKind::Variable { symbol_id } => {
                         self.infer_call_type_arguments(*symbol_id, &arg_exprs)
                     }
-                    TypedExpressionKind::FieldAccess { field_symbol, .. } => {
-                        self.infer_call_type_arguments(*field_symbol, &arg_exprs)
-                    }
+                    TypedExpressionKind::FieldAccess {
+                        object,
+                        field_symbol,
+                        ..
+                    } => self.infer_method_type_arguments(
+                        *field_symbol,
+                        &arg_exprs,
+                        object.expr_type,
+                    ),
                     TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => {
                         self.infer_call_type_arguments(*field_symbol, &arg_exprs)
                     }
@@ -6054,7 +6071,55 @@ impl<'a> AstLowering<'a> {
         callee_symbol: SymbolId,
         arguments: &[TypedExpression],
     ) -> Vec<TypeId> {
-        self.infer_call_type_arguments_with_result(callee_symbol, arguments, None)
+        self.infer_call_type_arguments_with_result(callee_symbol, arguments, None, None)
+    }
+
+    /// As `infer_call_type_arguments`, for a method called on `receiver`:
+    /// the receiver's type arguments fix the class's own parameters.
+    pub(crate) fn infer_method_type_arguments(
+        &self,
+        callee_symbol: SymbolId,
+        arguments: &[TypedExpression],
+        receiver: TypeId,
+    ) -> Vec<TypeId> {
+        self.infer_call_type_arguments_with_result(callee_symbol, arguments, None, Some(receiver))
+    }
+
+    /// The class parameters `receiver`'s type arguments bind.
+    fn receiver_class_bindings(&self, receiver: TypeId) -> Vec<(SymbolId, TypeId)> {
+        use crate::tast::core::TypeKind;
+        let table = self.context.type_table.borrow();
+        let mut ty = receiver;
+        for _ in 0..16 {
+            ty = Self::resolve_alias_chain(&table, ty);
+            match table.get(ty).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => ty = *inner_type,
+                Some(TypeKind::Class {
+                    symbol_id,
+                    type_args,
+                }) => {
+                    let Some(params) = self.context.symbol_table.get_class_type_params(*symbol_id)
+                    else {
+                        return Vec::new();
+                    };
+                    if params.len() != type_args.len() {
+                        return Vec::new();
+                    }
+                    return params
+                        .iter()
+                        .zip(type_args)
+                        .filter_map(|(param, arg)| match table.get(*param).map(|t| &t.kind) {
+                            Some(TypeKind::TypeParameter { symbol_id, .. }) => {
+                                Some((*symbol_id, *arg))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                }
+                _ => return Vec::new(),
+            }
+        }
+        Vec::new()
     }
 
     fn infer_call_type_arguments_with_result(
@@ -6062,8 +6127,13 @@ impl<'a> AstLowering<'a> {
         callee_symbol: SymbolId,
         arguments: &[TypedExpression],
         expected_result: Option<TypeId>,
+        receiver: Option<TypeId>,
     ) -> Vec<TypeId> {
         use crate::tast::core::TypeKind;
+        let fixed = receiver
+            .map(|receiver| self.receiver_class_bindings(receiver))
+            .unwrap_or_default();
+        let is_fixed = |var: &SymbolId| fixed.iter().any(|(bound, _)| bound == var);
 
         let Some(fn_type) = self
             .context
@@ -6141,7 +6211,9 @@ impl<'a> AstLowering<'a> {
         // declaration order, so their ids give the order type_args take.
         let mut mentioned = std::collections::BTreeSet::new();
         self.collect_type_param_symbols(fn_type, 0, &mut mentioned);
-        let mut resolved: BTreeMap<SymbolId, TypeId> = BTreeMap::new();
+        // An argument never rebinds a parameter the receiver fixes.
+        bindings.retain(|(var, _)| !is_fixed(var));
+        let mut resolved: BTreeMap<SymbolId, TypeId> = fixed.iter().copied().collect();
         // Int and Float bound to one variable unify to Float, as in Haxe. Not
         // when the Float is an array element: an array filled through Dynamic
         // may hold raw Ints its Float reads cannot tell apart.
@@ -6280,7 +6352,10 @@ impl<'a> AstLowering<'a> {
         // retains the type inferred by its caller.
         let bool_t = self.context.type_table.borrow().bool_type();
         for (declared, argument) in params.iter().zip(arguments.iter()) {
-            if let Some(var) = self.dynamic_bound_var(*declared, argument.expr_type, 0) {
+            if let Some(var) = self
+                .dynamic_bound_var(*declared, argument.expr_type, 0)
+                .filter(|var| !is_fixed(var))
+            {
                 let bound = resolved.get(&var).copied();
                 let annotated_dynamic = direct_vars.contains(&var)
                     && matches!(
