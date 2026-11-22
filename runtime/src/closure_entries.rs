@@ -53,20 +53,39 @@ fn canonical(code: usize) -> usize {
         .unwrap_or(code)
 }
 
-/// Make `alias` stand for `code`, moving what was registered under it.
+/// Make `alias` stand for `code`, moving what was registered under it. A
+/// stub compiled a second time already stands for the first code, where its
+/// registrations went; that code moves to `code` too.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_closure_alias_code(alias: usize, code: usize) {
     if alias == 0 || code == 0 || alias == code {
         return;
     }
-    ALIASES
-        .write()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .insert(alias, code);
+    let earlier = {
+        let mut guard = ALIASES.write().unwrap();
+        let aliases = guard.get_or_insert_with(HashMap::new);
+        let earlier = aliases.insert(alias, code).filter(|&e| e != code);
+        if let Some(earlier) = earlier {
+            for target in aliases.values_mut() {
+                if *target == earlier {
+                    *target = code;
+                }
+            }
+            aliases.insert(earlier, code);
+        }
+        earlier
+    };
     HAS_ALIASES.store(true, Ordering::Release);
+    move_registrations(alias, code);
+    if let Some(earlier) = earlier {
+        move_registrations(earlier, code);
+    }
+}
+
+/// What was registered under `from` now under `code`.
+fn move_registrations(from: usize, code: usize) {
     if let Some(map) = ENTRIES.write().unwrap().as_mut()
-        && let Some(entry) = map.remove(&alias)
+        && let Some(entry) = map.remove(&from)
     {
         let target = map.entry(code).or_default();
         if target.slot == 0 {
@@ -84,13 +103,13 @@ pub extern "C" fn haxe_closure_alias_code(alias: usize, code: usize) {
     }
     if let Some(methods) = METHODS.write().unwrap().as_mut() {
         for c in methods.values_mut() {
-            if *c == alias {
+            if *c == from {
                 *c = code;
             }
         }
     }
     if let Some(set) = BOUND_THUNKS.write().unwrap().as_mut()
-        && set.remove(&alias)
+        && set.remove(&from)
     {
         set.insert(code);
     }
@@ -564,5 +583,23 @@ mod tests {
         ));
         assert_eq!(closure_slot_code(compiled), slot);
         assert_eq!(closure_slot_code(stub), slot);
+    }
+
+    /// A stub compiled again keeps its registrations, under the new code as
+    /// well as under the first.
+    #[test]
+    fn a_second_compile_keeps_the_entries() {
+        let (stub, first, second, word) = (0x7400_0010, 0x7500_0020, 0x7600_0030, 0x7700_0040);
+        let target = record(stub, 0);
+        let word_record = record(word, 0);
+        haxe_closure_register_word_entry(
+            target.as_ptr() as *const u8,
+            word_record.as_ptr() as *const u8,
+        );
+        haxe_closure_alias_code(stub, first);
+        haxe_closure_alias_code(stub, second);
+        for code in [stub, first, second] {
+            assert_eq!(lookup(code).word, word);
+        }
     }
 }
