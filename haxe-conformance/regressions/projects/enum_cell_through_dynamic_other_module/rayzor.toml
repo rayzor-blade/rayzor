@@ -1,0 +1,5 @@
+[project]
+name = "enum-cell-through-dynamic-other-module"
+entry = "./EnumCellThroughDynamic.hx"
+[build]
+class-paths = ["."]

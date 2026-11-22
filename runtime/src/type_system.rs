@@ -315,6 +315,14 @@ pub(crate) fn dynamic_box_at(p: *mut u8) -> Option<DynamicValue> {
     if addr < 0x1000 || (addr & 7) != 0 || (addr >> 47) != 0 {
         return None;
     }
+    // An enum cell (its tag, then its enum's id) has a box's shape, and a
+    // tag of 2 or 3 reads as a Bool or Int box. Only a second word other
+    // than 0 or the reference mark needs the lookup.
+    let second = unsafe { *(p as *const u32).add(1) };
+    if second != 0 && second != REFERENCE_BOX_MARK && stamped_enum_cell_type(addr as i64).is_some()
+    {
+        return None;
+    }
     Some(unsafe { *(p as *const DynamicValue) })
 }
 
