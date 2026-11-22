@@ -2232,28 +2232,50 @@ pub extern "C" fn haxe_array_sort(arr: *mut HaxeArray, fn_ptr: usize, env_ptr: *
             dynamic_entry.unwrap_or_else(|| crate::closure_entries::closure_slot_code(fn_ptr)),
         );
 
-        // Simple insertion sort for now (stable, in-place)
-        // Elements are i64 (8 bytes each)
-        let data = arr_ref.ptr as *mut i64;
-        for i in 1..len {
-            let key = *data.add(i);
-            let mut j = i as isize - 1;
-            while j >= 0 {
-                let cmp = callback(env_ptr, *data.add(j as usize), key);
-                let cmp = if dynamic_entry.is_some() {
-                    crate::type_system::haxe_unbox_int_ptr(cmp as *mut u8)
-                } else {
-                    cmp
-                };
-                if cmp > 0 {
-                    *data.add((j + 1) as usize) = *data.add(j as usize);
-                    j -= 1;
-                } else {
-                    break;
+        // `a` goes after `b`: the comparator's sign, its result opened when
+        // it is a Dynamic.
+        let after = |a: i64, b: i64| {
+            let cmp = callback(env_ptr, a, b);
+            let cmp = if dynamic_entry.is_some() {
+                crate::type_system::haxe_unbox_int_ptr(cmp as *mut u8)
+            } else {
+                cmp
+            };
+            cmp > 0
+        };
+        // A stable bottom-up merge sort of the 8-byte slots, as each
+        // comparison is a call into Haxe. A slot moves before an earlier one
+        // only when the comparator puts the earlier one after it. The sorted
+        // slots replace the array's at the end, where the comparator may
+        // have moved its storage.
+        let mut src: Vec<i64> = std::slice::from_raw_parts(arr_ref.ptr as *const i64, len).to_vec();
+        let mut dst = vec![0i64; len];
+        let mut width = 1;
+        while width < len {
+            for start in (0..len).step_by(2 * width) {
+                let mid = (start + width).min(len);
+                let end = (start + 2 * width).min(len);
+                let (mut i, mut j, mut k) = (start, mid, start);
+                while i < mid && j < end {
+                    if after(src[i], src[j]) {
+                        dst[k] = src[j];
+                        j += 1;
+                    } else {
+                        dst[k] = src[i];
+                        i += 1;
+                    }
+                    k += 1;
                 }
+                dst[k..k + (mid - i)].copy_from_slice(&src[i..mid]);
+                k += mid - i;
+                dst[k..end].copy_from_slice(&src[j..end]);
             }
-            *data.add((j + 1) as usize) = key;
+            std::mem::swap(&mut src, &mut dst);
+            width *= 2;
         }
+        let array = &mut *arr;
+        let kept = array.len.min(len);
+        std::slice::from_raw_parts_mut(array.ptr as *mut i64, kept).copy_from_slice(&src[..kept]);
     }
 }
 
