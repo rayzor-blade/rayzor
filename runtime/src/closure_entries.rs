@@ -286,6 +286,29 @@ pub extern "C" fn haxe_closure_word_view(closure: *mut u8) -> *mut u8 {
     }
 }
 
+/// The code `haxe_closure_word_view` (`words`) or `haxe_closure_slot_view`
+/// would call through `closure`, for a caller that builds the view record
+/// itself; 0 for a null closure.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_closure_view_code(closure: *mut u8, words: bool) -> usize {
+    if closure.is_null() {
+        return 0;
+    }
+    let code = unsafe { *(closure as *const usize) };
+    if !words {
+        return closure_slot_code(code);
+    }
+    let entries = lookup(code);
+    match (entries.word, entries.slot) {
+        (0, 0) => code,
+        (0, _) => {
+            eprintln!("closure has a slot entry but no word entry: compiled with raw erased slots");
+            std::process::abort();
+        }
+        (word, _) => word,
+    }
+}
+
 /// A view of `closure` whose code is its dynamic entry, for a call whose
 /// argument and result types are all `Dynamic`. The closure itself when no
 /// entry is registered.

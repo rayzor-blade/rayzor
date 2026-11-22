@@ -272,6 +272,52 @@ impl<'a> HirToMirContext<'a> {
             .build_call_indirect(func_ptr, arg_regs, func_signature)
     }
 
+    /// `closure`'s word or slot view as a record on this frame's stack: the
+    /// view's code beside the closure's own environment, so a call through
+    /// it allocates nothing.
+    fn closure_view_record(&mut self, closure: IrId, words: bool) -> Option<IrId> {
+        let ptr = IrType::Ptr(Box::new(IrType::U8));
+        let bytes = IrType::Ptr(Box::new(IrType::I8));
+        let slot = IrType::Ptr(Box::new(IrType::I64));
+        let code_of = self.get_or_register_extern_function(
+            "haxe_closure_view_code",
+            vec![ptr.clone(), IrType::Bool],
+            IrType::I64,
+        );
+        let closure = self.coerce_reg_to(closure, &ptr)?;
+        let words = self.builder.build_const(IrValue::Bool(words))?;
+        let code = self
+            .builder
+            .build_call_direct(code_of, vec![closure, words], IrType::I64)?;
+        let eight = self.builder.build_const(IrValue::I64(8))?;
+        let closure_bytes = self.builder.build_bitcast(closure, bytes.clone())?;
+        let env_at = self
+            .builder
+            .build_gep(closure_bytes, vec![eight], bytes.clone())?;
+        let env_at = self.builder.build_bitcast(env_at, slot.clone())?;
+        let env = self.builder.build_load(env_at, IrType::I64)?;
+        // In the entry block, so a call in a loop reuses one stack slot.
+        let record = self.builder.alloc_reg()?;
+        let function = self.builder.current_function_mut()?;
+        let entry = function.cfg.entry_block;
+        function.cfg.blocks.get_mut(&entry)?.instructions.insert(
+            0,
+            IrInstruction::Alloc {
+                dest: record,
+                ty: IrType::Array(Box::new(IrType::I64), 2),
+                count: None,
+            },
+        );
+        function.register_types.insert(record, ptr.clone());
+        let code_at = self.builder.build_bitcast(record, slot.clone())?;
+        self.builder.build_store(code_at, code)?;
+        let record_bytes = self.builder.build_bitcast(record, bytes.clone())?;
+        let env_slot = self.builder.build_gep(record_bytes, vec![eight], bytes)?;
+        let env_slot = self.builder.build_bitcast(env_slot, slot)?;
+        self.builder.build_store(env_slot, env)?;
+        Some(record)
+    }
+
     fn lower_generic_slot_call(
         &mut self,
         expr: &HirExpr,
@@ -323,17 +369,7 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or(null)
             })
             .collect::<Vec<_>>();
-        let ptr = IrType::Ptr(Box::new(IrType::U8));
-        let view = self.get_or_register_extern_function(
-            if crate::debug_flags::erased_words() {
-                "haxe_closure_word_view"
-            } else {
-                "haxe_closure_slot_view"
-            },
-            vec![ptr.clone()],
-            ptr.clone(),
-        );
-        let closure = self.builder.build_call_direct(view, vec![closure], ptr)?;
+        let closure = self.closure_view_record(closure, crate::debug_flags::erased_words())?;
         let expected = self.convert_type(expr.ty);
         let signature = IrType::Function {
             params: vec![IrType::I64; slots.len()],

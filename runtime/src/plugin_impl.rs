@@ -2698,6 +2698,10 @@ register_symbol!(
     crate::closure_entries::haxe_closure_word_view
 );
 register_symbol!(
+    "haxe_closure_view_code",
+    crate::closure_entries::haxe_closure_view_code
+);
+register_symbol!(
     "haxe_array_mark_elem_kind",
     crate::haxe_array::haxe_array_mark_elem_kind
 );

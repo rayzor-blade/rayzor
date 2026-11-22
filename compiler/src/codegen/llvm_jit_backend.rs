@@ -4335,10 +4335,25 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         _ => alloc_ty,
                     };
 
+                    // A fixed-size slot goes in the function's entry block, so an
+                    // Alloc reached in a loop (an inlined callee's) reuses one slot.
+                    let here = self.builder.get_insert_block();
+                    let entry = here
+                        .and_then(|block| block.get_parent())
+                        .and_then(|function| function.get_first_basic_block());
+                    if let Some(entry) = entry {
+                        match entry.get_first_instruction() {
+                            Some(first) => self.builder.position_before(&first),
+                            None => self.builder.position_at_end(entry),
+                        }
+                    }
                     let alloca = self
                         .builder
                         .build_alloca(final_alloc_ty, &format!("stack_{}", dest.as_u32()))
                         .map_err(|e| format!("Failed to build alloca: {}", e))?;
+                    if let Some(here) = here {
+                        self.builder.position_at_end(here);
+                    }
                     self.value_map.insert(*dest, alloca.into());
                 } else {
                     // JIT mode or dynamic-count: use malloc() for heap allocation.
