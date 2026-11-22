@@ -345,7 +345,10 @@ impl<'a> HirToMirContext<'a> {
                 .iter()
                 .map(|t| self.convert_type_arg(*t))
                 .collect();
-            let inferred = self.infer_generic_call_args(func_id, args, false);
+            let mut inferred = self.infer_generic_call_args(func_id, args, false);
+            if inferred.is_empty() && self.function_map.get(field) != Some(&func_id) {
+                inferred = self.infer_forward_call_type_args(*field, args);
+            }
             if ir_type_args.is_empty() {
                 ir_type_args = inferred;
             } else if ir_type_args.len() == inferred.len() {

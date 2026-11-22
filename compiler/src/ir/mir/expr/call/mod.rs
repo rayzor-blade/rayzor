@@ -102,6 +102,49 @@ impl<'a> HirToMirContext<'a> {
             .unwrap_or_default()
     }
 
+    /// A static callee from another module has no signature in this one, so its
+    /// one type variable is bound from its declared type against the call's
+    /// arguments. Several variables have no known order, and give nothing.
+    pub(crate) fn infer_forward_call_type_args(
+        &self,
+        callee: SymbolId,
+        args: &[HirExpr],
+    ) -> Vec<IrType> {
+        let Some(fn_ty) = self.symbol_table.get_symbol(callee).map(|s| s.type_id) else {
+            return Vec::new();
+        };
+        let Some(TypeKind::Function {
+            params,
+            return_type,
+            ..
+        }) = self.type_table.get(fn_ty).map(|t| &t.kind)
+        else {
+            return Vec::new();
+        };
+        let mut declared = BTreeMap::new();
+        for &ty in params.iter().chain(std::iter::once(return_type)) {
+            self.bind_type_parameters(ty, ty, &mut declared, 0);
+        }
+        let [variable] = declared.keys().copied().collect::<Vec<_>>()[..] else {
+            return Vec::new();
+        };
+        let mut bindings = BTreeMap::new();
+        for (&formal, actual) in params.iter().zip(args) {
+            self.bind_type_parameters(formal, actual.ty, &mut bindings, 0);
+        }
+        match bindings.get(&variable) {
+            Some(&actual)
+                if !matches!(
+                    self.type_table.get(actual).map(|t| &t.kind),
+                    Some(TypeKind::Unknown)
+                ) =>
+            {
+                vec![self.convert_type_arg(actual)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn bind_generic_return_args(
         &self,
         id: IrFunctionId,

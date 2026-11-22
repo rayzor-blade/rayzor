@@ -1,0 +1,5 @@
+[project]
+name = "static-generic-call-other-module"
+entry = "./StaticGenericCallOtherModule.hx"
+[build]
+class-paths = ["."]
