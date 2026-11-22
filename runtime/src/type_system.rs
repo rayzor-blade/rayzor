@@ -4052,6 +4052,23 @@ pub extern "C" fn haxe_unbox_erased_return(ptr: *mut u8) -> i64 {
     ptr as usize as i64
 }
 
+/// A generic method's Dynamic-view result at a concrete type: under unboxed
+/// Dynamic scalars an Int or Float word opens as its box would, and any
+/// other value as `haxe_unbox_generic_return` takes it.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_unbox_dynamic_return(ptr: *mut u8, type_tag: i32) -> i64 {
+    if crate::erased_word::unboxed_dynamic_scalars()
+        && matches!(
+            ValueTag::from_i32(type_tag),
+            Some(ValueTag::Int | ValueTag::Float | ValueTag::Bool)
+        )
+        && let Some(mut word) = crate::erased_word::WordBox::of(ptr as *const u8)
+    {
+        return haxe_unbox_generic_return(word.ptr(), type_tag);
+    }
+    haxe_unbox_generic_return(ptr, type_tag)
+}
+
 /// A generic Dynamic keeps its box; concrete type arguments consume its payload.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_generic_return(ptr: *mut u8, type_tag: i32) -> i64 {

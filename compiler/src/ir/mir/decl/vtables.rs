@@ -1120,13 +1120,17 @@ impl<'a> HirToMirContext<'a> {
         shape: EntryShape,
     ) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-        // A slot result is an array element, which holds the `NullInt` itself.
+        // A slot result is an array element, which holds the `NullInt` itself;
+        // a word result is its Dynamic view, null or the Int's word.
         if let (Some(r), SlotKind::NullInt) = (result, kind) {
             let r = self.to_null_int(r)?;
-            return if matches!(shape, EntryShape::Slot | EntryShape::Word) {
-                self.builder.build_bitcast(r, IrType::I64)
-            } else {
-                self.null_int_to_dynamic(r)
+            return match shape {
+                EntryShape::Slot => self.builder.build_bitcast(r, IrType::I64),
+                EntryShape::Word => {
+                    let dynamic = self.null_int_to_dynamic(r)?;
+                    self.builder.build_bitcast(dynamic, IrType::I64)
+                }
+                _ => self.null_int_to_dynamic(r),
             };
         }
         match shape {

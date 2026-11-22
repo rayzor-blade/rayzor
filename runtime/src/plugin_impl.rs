@@ -1201,6 +1201,10 @@ register_symbol!(
     crate::type_system::haxe_unbox_generic_return
 );
 register_symbol!(
+    "haxe_unbox_dynamic_return",
+    crate::type_system::haxe_unbox_dynamic_return
+);
+register_symbol!(
     "haxe_adapt_generic_value",
     crate::type_system::haxe_adapt_generic_value
 );

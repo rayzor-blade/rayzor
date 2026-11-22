@@ -1923,7 +1923,13 @@ impl<'a> HirToMirContext<'a> {
         if !shape_as_scalar && !shape_as_pointer {
             return Some(call_result);
         }
-        let bits = self.unbox_generic_value(call_result, resolved)?;
+        // The result is the callee's Dynamic view, so a scalar word opens.
+        let unbox = if crate::debug_flags::erased_words() {
+            "haxe_unbox_dynamic_return"
+        } else {
+            "haxe_unbox_generic_return"
+        };
+        let bits = self.unbox_generic_value_with(call_result, resolved, unbox)?;
         match target {
             IrType::I64 => Some(bits),
             IrType::I32 | IrType::Bool => self.builder.build_cast(bits, IrType::I64, target),
@@ -1941,6 +1947,10 @@ impl<'a> HirToMirContext<'a> {
 
     /// Resolve the payload representation when an enclosing generic binds T.
     pub(crate) fn unbox_generic_value(&mut self, value: IrId, ty: TypeId) -> Option<IrId> {
+        self.unbox_generic_value_with(value, ty, "haxe_unbox_generic_return")
+    }
+
+    fn unbox_generic_value_with(&mut self, value: IrId, ty: TypeId, unbox: &str) -> Option<IrId> {
         let parameter = self.resolve_type_param_name(self.resolve_through_aliases(ty));
         let name = parameter
             .clone()
@@ -1959,11 +1969,8 @@ impl<'a> HirToMirContext<'a> {
         }
         let ptr = IrType::Ptr(Box::new(IrType::U8));
         let value = self.coerce_reg_to(value, &ptr)?;
-        let unbox = self.get_or_register_extern_function(
-            "haxe_unbox_generic_return",
-            vec![ptr, IrType::I32],
-            IrType::I64,
-        );
+        let unbox =
+            self.get_or_register_extern_function(unbox, vec![ptr, IrType::I32], IrType::I64);
         let word = self
             .builder
             .build_call_direct(unbox, vec![value, tag], IrType::I64)?;

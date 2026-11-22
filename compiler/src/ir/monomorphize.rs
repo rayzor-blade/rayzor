@@ -2434,6 +2434,17 @@ impl Monomorphizer {
             self.next_func_id = self.next_func_id.max(module.next_function_id);
             id
         });
+        let null_int_to_dynamic = (word && sig.return_type == IrType::NullInt).then(|| {
+            module.next_function_id = module.next_function_id.max(self.next_func_id);
+            let id = super::erased_word::extern_fn(
+                module,
+                "haxe_null_int_to_dynamic",
+                IrType::NullInt,
+                IrType::Ptr(Box::new(IrType::U8)),
+            );
+            self.next_func_id = self.next_func_id.max(module.next_function_id);
+            id
+        });
         let mut open = |name: &str| {
             (word && declared.iter().any(|t| matches!(t, IrType::Ptr(_)))).then(|| {
                 module.next_function_id = module.next_function_id.max(self.next_func_id);
@@ -2518,7 +2529,14 @@ impl Monomorphizer {
             Some(r) if word && ret == IrType::dynamic_ptr() => {
                 regs.encode_dynamic(decoders.as_ref(), &mut out, r)
             }
-            Some(r) => regs.to_slot(&mut out, r, &ret),
+            Some(r) => match null_int_to_dynamic {
+                // A word result is the `NullInt`'s Dynamic view: null or the Int's word.
+                Some(to_dynamic) => {
+                    let dynamic = regs.call(&mut out, to_dynamic, r, &ptr_u8);
+                    regs.bitcast(&mut out, dynamic, &IrType::I64)
+                }
+                None => regs.to_slot(&mut out, r, &ret),
+            },
         };
         let block = entry.cfg.entry_block;
         let block = entry.cfg.blocks.get_mut(&block)?;
