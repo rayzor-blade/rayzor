@@ -249,16 +249,32 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Int values widen to Float when a Float is among them or, with
-    /// `expected_float`, when the context expects Float elements.
+    /// `expected_float`, when the context expects Float elements; among Int
+    /// and Single values only, they widen to Single.
     fn widen_ints(&self, mut values: Vec<&mut TypedExpression>, expected_float: bool) {
-        let (int_t, float_t) = {
+        let (int_t, float_t, single_t) = {
             let tt = self.context.type_table.borrow();
-            (tt.int_type(), tt.float_type())
+            let single = values.iter().map(|e| e.expr_type).find(|&ty| {
+                matches!(
+                    tt.get(ty).map(|t| &t.kind),
+                    Some(TypeKind::Abstract { symbol_id, .. })
+                        if self.context.symbol_table.get_symbol(*symbol_id).is_some_and(|s| {
+                            is_haxe_std_type(s, self.context.string_interner, &["Single"])
+                        })
+                )
+            });
+            (tt.int_type(), tt.float_type(), single)
         };
-        if !(expected_float || values.iter().any(|e| e.expr_type == float_t))
-            || !values
-                .iter()
-                .all(|e| e.expr_type == float_t || e.expr_type == int_t)
+        let float_t = if expected_float || values.iter().any(|e| e.expr_type == float_t) {
+            float_t
+        } else if let Some(single_t) = single_t {
+            single_t
+        } else {
+            return;
+        };
+        if !values
+            .iter()
+            .all(|e| e.expr_type == float_t || e.expr_type == int_t)
         {
             return;
         }
