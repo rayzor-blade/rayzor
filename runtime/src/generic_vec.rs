@@ -383,17 +383,12 @@ pub extern "C" fn rayzor_vec_i32_sort_by(
         type CompareFn = extern "C" fn(*const u8, i32, i32) -> i32;
         let compare: CompareFn = std::mem::transmute(compare_fn);
 
-        let slice = std::slice::from_raw_parts_mut(v.ptr, v.len);
-        slice.sort_by(|a, b| {
-            let cmp = compare(compare_env, *a, *b);
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
+        let items = std::slice::from_raw_parts(v.ptr, v.len);
+        let sorted = crate::haxe_array::merge_sorted(items, |a, b| compare(compare_env, a, b) > 0);
+        // The comparator may have resized the vector.
+        let v = &mut *vec;
+        let kept = v.len.min(sorted.len());
+        std::slice::from_raw_parts_mut(v.ptr, kept).copy_from_slice(&sorted[..kept]);
     }
 }
 
@@ -742,8 +737,8 @@ pub extern "C" fn rayzor_vec_f64_sort(vec: *mut VecF64) {
             return;
         }
         let slice = std::slice::from_raw_parts_mut(v.ptr, v.len);
-        // Use partial_cmp for f64 since it doesn't implement Ord
-        slice.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // A total order, so a NaN cannot break the sort.
+        slice.sort_by(f64::total_cmp);
     }
 }
 
@@ -770,17 +765,12 @@ pub extern "C" fn rayzor_vec_f64_sort_by(
         type CompareFn = extern "C" fn(*const u8, f64, f64) -> i32;
         let compare: CompareFn = std::mem::transmute(compare_fn);
 
-        let slice = std::slice::from_raw_parts_mut(v.ptr, v.len);
-        slice.sort_by(|a, b| {
-            let cmp = compare(compare_env, *a, *b);
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
+        let items = std::slice::from_raw_parts(v.ptr, v.len);
+        let sorted = crate::haxe_array::merge_sorted(items, |a, b| compare(compare_env, a, b) > 0);
+        // The comparator may have resized the vector.
+        let v = &mut *vec;
+        let kept = v.len.min(sorted.len());
+        std::slice::from_raw_parts_mut(v.ptr, kept).copy_from_slice(&sorted[..kept]);
     }
 }
 
@@ -951,9 +941,9 @@ pub extern "C" fn rayzor_vec_ptr_last(vec: *const VecPtr) -> *mut u8 {
 
 /// Sort Vec<ptr> using a comparison function (Haxe closure)
 /// For reference types, there's no natural ordering so only sortBy is provided.
-/// compare_fn: closure function pointer
-/// compare_env: closure captured environment
-/// The closure signature is: (env, a, b) -> Int where negative means a < b, 0 means a == b, positive means a > b
+/// compare_fn: closure code pointer, compare_env: its captured environment.
+/// The elements are erased slots (words by default), so the comparator is
+/// called through its word or slot entry, never its typed code.
 #[unsafe(no_mangle)]
 pub extern "C" fn rayzor_vec_ptr_sort_by(
     vec: *mut VecPtr,
@@ -969,22 +959,30 @@ pub extern "C" fn rayzor_vec_ptr_sort_by(
             return;
         }
 
-        // The comparison function takes (env, a, b) and returns i32
-        // where a and b are pointers to objects
-        type CompareFn = extern "C" fn(*const u8, *mut u8, *mut u8) -> i32;
-        let compare: CompareFn = std::mem::transmute(compare_fn);
-
-        let slice = std::slice::from_raw_parts_mut(v.ptr, v.len);
-        slice.sort_by(|a, b| {
-            let cmp = compare(compare_env, *a, *b);
-            if cmp < 0 {
-                std::cmp::Ordering::Less
-            } else if cmp > 0 {
-                std::cmp::Ordering::Greater
+        let words = crate::erased_word::unboxed_dynamic_scalars();
+        let code = if words {
+            crate::closure_entries::closure_word_code(compare_fn as usize)
+        } else {
+            crate::closure_entries::closure_slot_code(compare_fn as usize)
+        };
+        type CompareFn = extern "C" fn(*const u8, *mut u8, *mut u8) -> i64;
+        let compare: CompareFn = std::mem::transmute(code);
+        let after = |a, b| {
+            let cmp = compare(compare_env, a, b);
+            let cmp = if words {
+                crate::erased_word::haxe_word_to_int(cmp as u64)
             } else {
-                std::cmp::Ordering::Equal
-            }
-        });
+                cmp as i32
+            };
+            cmp > 0
+        };
+
+        let items = std::slice::from_raw_parts(v.ptr, v.len);
+        let sorted = crate::haxe_array::merge_sorted(items, after);
+        // The comparator may have resized the vector.
+        let v = &mut *vec;
+        let kept = v.len.min(sorted.len());
+        std::slice::from_raw_parts_mut(v.ptr, kept).copy_from_slice(&sorted[..kept]);
     }
 }
 

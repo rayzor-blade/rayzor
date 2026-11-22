@@ -2209,6 +2209,39 @@ pub extern "C" fn haxe_array_to_string(arr: *const HaxeArray) -> *mut HaxeString
 // Higher-Order Array Methods
 // ============================================================================
 
+/// A stable bottom-up merge sort into a new Vec, as each comparison may be a
+/// call into Haxe: O(n log n) calls, and no abort when `after` is not a total
+/// order. An item moves before an earlier one only when `after(earlier, it)`.
+pub(crate) fn merge_sorted<T: Copy>(items: &[T], mut after: impl FnMut(T, T) -> bool) -> Vec<T> {
+    let len = items.len();
+    let mut src = items.to_vec();
+    let mut dst = items.to_vec();
+    let mut width = 1;
+    while width < len {
+        for start in (0..len).step_by(2 * width) {
+            let mid = (start + width).min(len);
+            let end = (start + 2 * width).min(len);
+            let (mut i, mut j, mut k) = (start, mid, start);
+            while i < mid && j < end {
+                if after(src[i], src[j]) {
+                    dst[k] = src[j];
+                    j += 1;
+                } else {
+                    dst[k] = src[i];
+                    i += 1;
+                }
+                k += 1;
+            }
+            dst[k..k + (mid - i)].copy_from_slice(&src[i..mid]);
+            k += mid - i;
+            dst[k..end].copy_from_slice(&src[j..end]);
+        }
+        std::mem::swap(&mut src, &mut dst);
+        width *= 2;
+    }
+    src
+}
+
 /// Sort: in-place sort using comparator callback.
 /// Callback signature: fn(env_ptr: *mut u8, a: i64, b: i64) -> i32
 /// Returns negative if a < b, 0 if equal, positive if a > b.
@@ -2243,36 +2276,12 @@ pub extern "C" fn haxe_array_sort(arr: *mut HaxeArray, fn_ptr: usize, env_ptr: *
             };
             cmp > 0
         };
-        // A stable bottom-up merge sort of the 8-byte slots, as each
-        // comparison is a call into Haxe. A slot moves before an earlier one
-        // only when the comparator puts the earlier one after it. The sorted
-        // slots replace the array's at the end, where the comparator may
-        // have moved its storage.
-        let mut src: Vec<i64> = std::slice::from_raw_parts(arr_ref.ptr as *const i64, len).to_vec();
-        let mut dst = vec![0i64; len];
-        let mut width = 1;
-        while width < len {
-            for start in (0..len).step_by(2 * width) {
-                let mid = (start + width).min(len);
-                let end = (start + 2 * width).min(len);
-                let (mut i, mut j, mut k) = (start, mid, start);
-                while i < mid && j < end {
-                    if after(src[i], src[j]) {
-                        dst[k] = src[j];
-                        j += 1;
-                    } else {
-                        dst[k] = src[i];
-                        i += 1;
-                    }
-                    k += 1;
-                }
-                dst[k..k + (mid - i)].copy_from_slice(&src[i..mid]);
-                k += mid - i;
-                dst[k..end].copy_from_slice(&src[j..end]);
-            }
-            std::mem::swap(&mut src, &mut dst);
-            width *= 2;
-        }
+        // The sorted slots replace the array's at the end, where the
+        // comparator may have moved its storage.
+        let src = merge_sorted(
+            std::slice::from_raw_parts(arr_ref.ptr as *const i64, len),
+            after,
+        );
         let array = &mut *arr;
         let kept = array.len.min(len);
         std::slice::from_raw_parts_mut(array.ptr as *mut i64, kept).copy_from_slice(&src[..kept]);

@@ -314,9 +314,16 @@ pub extern "C" fn haxe_closure_view_code(closure: *mut u8, words: bool) -> usize
         return 0;
     }
     let code = unsafe { *(closure as *const usize) };
-    if !words {
-        return closure_slot_code(code);
+    if words {
+        closure_word_code(code)
+    } else {
+        closure_slot_code(code)
     }
+}
+
+/// The word-shaped entry for `code`, or `code` itself when it has no slot
+/// entry either (every declared type already is a word).
+pub(crate) fn closure_word_code(code: usize) -> usize {
     let entries = lookup(code);
     match (entries.word, entries.slot) {
         (0, 0) => code,
