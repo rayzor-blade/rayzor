@@ -753,7 +753,8 @@ pub extern "C" fn haxe_reflect_is_object(v: *mut u8) -> bool {
 /// v: DynamicValue pointer
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_reflect_is_function(v: *mut u8) -> bool {
-    if v.is_null() {
+    // A scalar word is no function.
+    if v.is_null() || crate::erased_word::scalar_word(v as *const u8).is_some() {
         return false;
     }
     unsafe {

@@ -4802,6 +4802,10 @@ pub(crate) fn is_raw_class_instance(ptr: *mut u8) -> bool {
 /// returns the raw payload pointer. A null box (empty channel) -> 0.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_channel_unbox_erased(box_ptr: *mut u8) -> i64 {
+    // A scalar word reads as a box on this stack frame.
+    if let Some(mut word) = crate::erased_word::WordBox::of(box_ptr as *const u8) {
+        return haxe_channel_unbox_erased(word.ptr());
+    }
     if box_ptr.is_null() {
         return 0;
     }
@@ -4898,8 +4902,9 @@ pub extern "C" fn haxe_null_null_eq_float(a: *mut u8, b: *mut u8) -> bool {
 /// read as garbage). Null (empty channel) stays null either way.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_channel_unbox_try(box_ptr: *mut u8) -> *mut u8 {
-    if box_ptr.is_null() {
-        return std::ptr::null_mut();
+    // A scalar word is its own nullable, as a primitive's box is.
+    if box_ptr.is_null() || crate::erased_word::scalar_word(box_ptr as *const u8).is_some() {
+        return box_ptr;
     }
     unsafe {
         let dynamic = *(box_ptr as *const DynamicValue);
