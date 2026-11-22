@@ -36,6 +36,20 @@ impl<'a> HirToMirContext<'a> {
     ) {
         match pattern {
             HirPattern::Variable { name, symbol } => {
+                // A Float bound to a Single, or the reverse, is converted here, so the
+                // binding's register and a captured variable's cell hold its own width.
+                let value = match (
+                    ty.map(|t| self.convert_type(t)),
+                    self.builder.get_register_type(value),
+                ) {
+                    (
+                        Some(want @ (IrType::F32 | IrType::F64)),
+                        Some(have @ (IrType::F32 | IrType::F64)),
+                    ) if want != have => {
+                        self.builder.build_cast(value, have, want).unwrap_or(value)
+                    }
+                    _ => value,
+                };
                 self.symbol_map.insert(*symbol, value);
 
                 // Register as local so Cranelift can find the type
