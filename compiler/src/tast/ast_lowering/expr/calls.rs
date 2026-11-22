@@ -2494,32 +2494,7 @@ impl<'a> AstLowering<'a> {
                     let Some(result) = result else {
                         return false;
                     };
-                    // Each parameter the result names takes the expected type's
-                    // argument, Dynamic included, which unification skips.
-                    let bindings: Vec<(SymbolId, TypeId)> = {
-                        let table = self.context.type_table.borrow();
-                        let args_of = |ty: TypeId| match table.get(ty).map(|t| &t.kind) {
-                            Some(TypeKind::Abstract {
-                                symbol_id,
-                                type_args,
-                                ..
-                            }) => Some((*symbol_id, type_args.clone())),
-                            _ => None,
-                        };
-                        match (args_of(result), args_of(formal_ty)) {
-                            (Some((r, rs)), Some((f, fs))) if r == f && rs.len() == fs.len() => rs
-                                .iter()
-                                .zip(&fs)
-                                .filter_map(|(r, f)| match table.get(*r).map(|t| &t.kind) {
-                                    Some(TypeKind::TypeParameter { symbol_id, .. }) => {
-                                        Some((*symbol_id, *f))
-                                    }
-                                    _ => None,
-                                })
-                                .collect(),
-                            _ => Vec::new(),
-                        }
-                    };
+                    let bindings = self.result_bindings_from_expected(result, formal_ty);
                     if bindings.is_empty() {
                         return false;
                     }
@@ -2687,13 +2662,7 @@ impl<'a> AstLowering<'a> {
             return arg;
         };
         let location = arg.source_location.clone();
-        let arguments = vec![arg];
-        let type_arguments = self.infer_call_type_arguments_with_result(
-            method_symbol,
-            &arguments,
-            Some(formal_ty),
-            None,
-        );
+        let mut arguments = vec![arg];
         let declared_return = self
             .context
             .symbol_table
@@ -2705,6 +2674,26 @@ impl<'a> AstLowering<'a> {
                     _ => None,
                 }
             });
+        // A concrete expected abstract binds the conversion's parameters
+        // first, as Haxe types the call against it: `"h"` at
+        // `IntoReactive<Dynamic>` is `fromConst<Dynamic>`, the String boxed.
+        let fixed = if concrete_formal {
+            declared_return
+                .map(|ret| self.result_bindings_from_expected(ret, formal_ty))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let fixes_result = !fixed.is_empty();
+        let type_arguments = self.infer_call_type_arguments_with_result(
+            method_symbol,
+            &arguments,
+            Some(formal_ty),
+            fixed,
+        );
+        if fixes_result {
+            self.coerce_inferred_call_arguments(method_symbol, &type_arguments, &mut arguments);
+        }
         // The result the argument infers, which binds a generic formal. A
         // concrete formal that differs from it only by `Null<>` on a type
         // argument takes the formal: a nullable value passes as the plain one.
@@ -2714,8 +2703,9 @@ impl<'a> AstLowering<'a> {
             .unwrap_or(formal_ty);
         let expr_type = {
             let types = self.context.type_table.borrow();
-            if !self.type_mentions_type_param(&types, formal_ty)
-                && same_but_nullable_args(&types, inferred, formal_ty)
+            if fixes_result
+                || (!self.type_mentions_type_param(&types, formal_ty)
+                    && same_but_nullable_args(&types, inferred, formal_ty))
             {
                 formal_ty
             } else {
@@ -6071,7 +6061,7 @@ impl<'a> AstLowering<'a> {
         callee_symbol: SymbolId,
         arguments: &[TypedExpression],
     ) -> Vec<TypeId> {
-        self.infer_call_type_arguments_with_result(callee_symbol, arguments, None, None)
+        self.infer_call_type_arguments_with_result(callee_symbol, arguments, None, Vec::new())
     }
 
     /// As `infer_call_type_arguments`, for a method called on `receiver`:
@@ -6082,7 +6072,39 @@ impl<'a> AstLowering<'a> {
         arguments: &[TypedExpression],
         receiver: TypeId,
     ) -> Vec<TypeId> {
-        self.infer_call_type_arguments_with_result(callee_symbol, arguments, None, Some(receiver))
+        let fixed = self.receiver_class_bindings(receiver);
+        self.infer_call_type_arguments_with_result(callee_symbol, arguments, None, fixed)
+    }
+
+    /// The parameters a conversion's `result` names, bound to the expected
+    /// abstract's arguments at the same positions, Dynamic included, which
+    /// unification skips.
+    fn result_bindings_from_expected(
+        &self,
+        result: TypeId,
+        expected: TypeId,
+    ) -> Vec<(SymbolId, TypeId)> {
+        use crate::tast::core::TypeKind;
+        let table = self.context.type_table.borrow();
+        let args_of = |ty: TypeId| match table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Abstract {
+                symbol_id,
+                type_args,
+                ..
+            }) => Some((*symbol_id, type_args.clone())),
+            _ => None,
+        };
+        match (args_of(result), args_of(expected)) {
+            (Some((r, rs)), Some((f, fs))) if r == f && rs.len() == fs.len() => rs
+                .iter()
+                .zip(&fs)
+                .filter_map(|(r, f)| match table.get(*r).map(|t| &t.kind) {
+                    Some(TypeKind::TypeParameter { symbol_id, .. }) => Some((*symbol_id, *f)),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// The class parameters `receiver`'s type arguments bind.
@@ -6127,12 +6149,9 @@ impl<'a> AstLowering<'a> {
         callee_symbol: SymbolId,
         arguments: &[TypedExpression],
         expected_result: Option<TypeId>,
-        receiver: Option<TypeId>,
+        fixed: Vec<(SymbolId, TypeId)>,
     ) -> Vec<TypeId> {
         use crate::tast::core::TypeKind;
-        let fixed = receiver
-            .map(|receiver| self.receiver_class_bindings(receiver))
-            .unwrap_or_default();
         let is_fixed = |var: &SymbolId| fixed.iter().any(|(bound, _)| bound == var);
 
         let Some(fn_type) = self
