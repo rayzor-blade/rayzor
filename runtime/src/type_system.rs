@@ -3789,9 +3789,12 @@ pub extern "C" fn haxe_box_float_ptr(value: f64) -> *mut u8 {
 /// Box a Bool as Dynamic (returns opaque pointer to DynamicValue)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_bool_ptr(value: bool) -> *mut u8 {
-    let dynamic = haxe_box_bool(value);
-    let boxed = Box::new(dynamic);
-    Box::into_raw(boxed) as *mut u8
+    // A Bool box is never written or freed, so every Bool Dynamic shares one
+    // of two, made once.
+    static BOXES: std::sync::OnceLock<[usize; 2]> = std::sync::OnceLock::new();
+    let boxes = BOXES
+        .get_or_init(|| [false, true].map(|v| Box::into_raw(Box::new(haxe_box_bool(v))) as usize));
+    boxes[usize::from(value)] as *mut u8
 }
 
 /// Box a null-terminated **C string** as Dynamic.
@@ -4102,6 +4105,13 @@ pub extern "C" fn haxe_unbox_generic_return(ptr: *mut u8, type_tag: i32) -> i64 
             }
             _ => ptr as i64,
         };
+    }
+    // A Bool word is no Dynamic, as an Int or Float word is; its box is.
+    if type_tag == ValueTag::Dynamic as i32
+        && crate::erased_word::unboxed_dynamic_scalars()
+        && crate::erased_word::kind(ptr as u64) == crate::erased_word::WordKind::Bool
+    {
+        return haxe_box_bool_ptr(crate::erased_word::haxe_word_to_bool(ptr as u64)) as i64;
     }
     if type_tag == ValueTag::Dynamic as i32
         || (type_tag == ValueTag::Int64 as i32 && !int64_slot_may_be_object(ptr))
