@@ -580,8 +580,18 @@ impl<'a> HirToMirContext<'a> {
                     vec![ptr_u8.clone(), IrType::I64],
                     ptr_u8.clone(),
                 );
-                self.builder
-                    .build_call_direct(downcast_id, vec![value_reg, type_id_const], ptr_u8)
+                let downcast = self.builder.build_call_direct(
+                    downcast_id,
+                    vec![value_reg, type_id_const],
+                    ptr_u8,
+                )?;
+                // The String is the box's payload; typed as one, so a reader
+                // does not stringify it as a Dynamic.
+                if matches!(&target_kind, Some(TypeKind::String)) {
+                    self.builder.build_bitcast(downcast, IrType::String)
+                } else {
+                    Some(downcast)
+                }
             }
 
             // Concrete → Dynamic: box the value
