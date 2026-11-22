@@ -236,7 +236,10 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or(IrType::I64);
             let loaded = self.builder.build_load(cell, value_ty.clone())?;
             self.builder.register_local(loaded, value_ty)?;
-            self.symbol_map.insert(*symbol, loaded);
+            // The binding already maps the symbol and every read reloads, so a
+            // later load stays out of the map, where a join would take it as
+            // the variable's value on paths that never ran it.
+            self.symbol_map.entry(*symbol).or_insert(loaded);
             return Some(loaded);
         }
 
