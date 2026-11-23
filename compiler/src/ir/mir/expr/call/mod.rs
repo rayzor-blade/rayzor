@@ -142,7 +142,26 @@ impl<'a> HirToMirContext<'a> {
                 _ => None,
             })
             .collect::<Option<_>>()?;
-        if class_params.is_empty() || class_params.len() != class_args.len() {
+        if class_params.is_empty() {
+            return None;
+        }
+        // `this` inside the class names no arguments: its own parameters,
+        // in scope here, are.
+        let class_args = if class_args.is_empty() {
+            let names = self.current_type_param_names();
+            let own = self.symbol_table.get_class_type_params(class)?.clone();
+            let in_scope = own.iter().all(|ty| {
+                self.resolve_type_param_name(*ty)
+                    .is_some_and(|name| names.contains(&name))
+            });
+            if !in_scope {
+                return None;
+            }
+            own
+        } else {
+            class_args
+        };
+        if class_params.len() != class_args.len() {
             return None;
         }
         // Only the class's own methods: an inherited or foreign callee orders

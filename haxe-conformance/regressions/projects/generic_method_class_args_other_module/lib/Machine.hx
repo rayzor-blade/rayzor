@@ -16,6 +16,14 @@ class Machine<S:EnumValue, E> {
 	public function current():S
 		return state;
 
+	public function relay(event:E):Void
+		send(event);
+
+	public function later(event:E):Void {
+		final f = () -> send(event);
+		f();
+	}
+
 	public function send(event:E):Void {
 		queue.push(event);
 		while (queue.length > 0) {
