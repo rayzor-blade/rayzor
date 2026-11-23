@@ -1285,7 +1285,7 @@ impl<'a> HirToMirContext<'a> {
                     if self.is_tag_only_enum_type(resolved_arg)
                         && self.builder.get_register_type(arg_reg) == Some(IrType::I64)
                         && matches!(
-                            self.type_table.get(resolved_param).map(|t| &t.kind),
+                            self.type_table.get(param_type_id).map(|t| &t.kind),
                             Some(TypeKind::Optional { inner_type })
                                 if self.optional_inner_is_type_param(*inner_type)
                                     || self.is_tag_only_enum_type(*inner_type)

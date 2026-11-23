@@ -62,6 +62,28 @@ impl<'a> HirToMirContext<'a> {
     }
 
     pub(crate) fn lower_cast(&mut self, expr: &HirExpr) -> Option<IrId> {
+        // `(v : Null<E>)` of a tag-only enum is its view, so the first
+        // constructor does not read as null.
+        if let HirExprKind::Cast {
+            expr: inner,
+            target,
+            ..
+        } = &expr.kind
+            && let Some(optional) = self
+                .optional_inner_type(*target)
+                .or_else(|| self.optional_inner_type(expr.ty))
+            && self.is_tag_only_enum_type(optional)
+            && self.is_tag_only_enum_type(inner.ty)
+            && self.optional_inner_type(inner.ty).is_none()
+        {
+            let value = self.lower_expression(inner)?;
+            if self.builder.get_register_type(value) == Some(IrType::I64) {
+                let enum_symbol =
+                    self.resolve_enum_symbol(self.resolve_through_aliases(optional))?;
+                return self.build_tag_enum_dynamic(enum_symbol, value);
+            }
+            return Some(value);
+        }
         let HirExprKind::Cast {
             expr,
             target,
