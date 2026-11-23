@@ -47,6 +47,9 @@ enum SlotKind {
     NullInt,
     /// An Int64: raw bits in a slot, its two-word class through a Dynamic entry.
     Int64,
+    /// A `Null<E>` of a tag-only enum `E`: the discriminant (`NULL_INT` for
+    /// null) in a slot, the enum's view in a word or a Dynamic.
+    TagEnumView(SymbolId),
     Void,
 }
 
@@ -688,14 +691,43 @@ impl<'a> HirToMirContext<'a> {
             .signature
             .clone();
         let is_slot = |ty: &IrType| matches!(ty, IrType::I64 | IrType::Ptr(_) | IrType::Void);
-        let entry =
-            if sig.parameters.iter().skip(1).all(|p| is_slot(&p.ty)) && is_slot(&sig.return_type) {
-                None
-            } else {
-                self.build_closure_entry(target, &sig, fn_type, EntryShape::Slot)
-            };
+        let entry = if sig.parameters.iter().skip(1).all(|p| is_slot(&p.ty))
+            && is_slot(&sig.return_type)
+            && !self.closure_takes_tag_enum_view(&sig, fn_type)
+        {
+            None
+        } else {
+            self.build_closure_entry(target, &sig, fn_type, EntryShape::Slot)
+        };
         self.closure_slot_entries.insert(target, entry);
         entry
+    }
+
+    /// Whether a parameter or the result of a closure is a tag-only enum's
+    /// `Null<E>` view, which a slot carries as the discriminant instead.
+    fn closure_takes_tag_enum_view(
+        &self,
+        sig: &IrFunctionSignature,
+        fn_type: Option<TypeId>,
+    ) -> bool {
+        let Some(TypeKind::Function {
+            params,
+            return_type,
+            ..
+        }) = fn_type
+            .and_then(|t| self.type_table.get(t))
+            .map(|t| &t.kind)
+        else {
+            return false;
+        };
+        let declared = &sig.parameters[1.min(sig.parameters.len())..];
+        params.len() == declared.len()
+            && declared
+                .iter()
+                .zip(params.iter())
+                .map(|(p, ty)| (&p.ty, *ty))
+                .chain(std::iter::once((&sig.return_type, *return_type)))
+                .any(|(ir, ty)| matches!(self.slot_kind(Some(ty), ir), SlotKind::TagEnumView(_)))
     }
 
     /// The word-shaped entry of a closure target, `(env, word..) -> word`:
@@ -770,6 +802,21 @@ impl<'a> HirToMirContext<'a> {
                     if self.optional_inner_is_null_int(*inner_type) =>
                 {
                     return SlotKind::NullInt;
+                }
+                // Under raw erased slots a generic body's call reaches the slot
+                // entry too and passes the view, so there the slot is the view.
+                Some(TypeKind::Optional { inner_type })
+                    if crate::debug_flags::erased_words()
+                        && matches!(ir_ty, IrType::Ptr(_))
+                        && self.is_tag_only_enum_type(*inner_type) =>
+                {
+                    if let Some(TypeKind::Enum { symbol_id, .. }) = self
+                        .type_table
+                        .get(self.resolve_through_aliases(*inner_type))
+                        .map(|t| &t.kind)
+                    {
+                        return SlotKind::TagEnumView(*symbol_id);
+                    }
                 }
                 Some(TypeKind::Optional { inner_type }) => {
                     return if self.optional_inner_is_boxable_primitive(*inner_type) {
@@ -977,6 +1024,19 @@ impl<'a> HirToMirContext<'a> {
         shape: EntryShape,
     ) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        if let SlotKind::TagEnumView(enum_symbol) = kind {
+            let view = if shape == EntryShape::Slot {
+                self.build_tag_enum_dynamic(*enum_symbol, reg)?
+            } else {
+                reg
+            };
+            let have = self.builder.get_register_type(view)?;
+            return if have == *want {
+                Some(view)
+            } else {
+                self.builder.build_bitcast(view, want.clone())
+            };
+        }
         if *kind == SlotKind::NullInt {
             // A slot holds the `NullInt` bits or an Int, where 0 is a value; a
             // Dynamic holds a box or null.
@@ -1120,6 +1180,13 @@ impl<'a> HirToMirContext<'a> {
         shape: EntryShape,
     ) -> Option<IrId> {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        if let (Some(r), SlotKind::TagEnumView(_)) = (result, kind) {
+            return match shape {
+                EntryShape::Slot => self.tag_enum_from_view(r),
+                EntryShape::Word => self.builder.build_bitcast(r, IrType::I64),
+                _ => self.builder.build_bitcast(r, ptr_u8),
+            };
+        }
         // A slot result is an array element, which holds the `NullInt` itself;
         // a word result is its Dynamic view, null or the Int's word.
         if let (Some(r), SlotKind::NullInt) = (result, kind) {
@@ -1161,6 +1228,7 @@ impl<'a> HirToMirContext<'a> {
                 let (box_fn, param_ty, arg) = match kind {
                     SlotKind::Void => return self.builder.build_const(IrValue::Null),
                     SlotKind::NullInt => return self.null_int_to_dynamic(r),
+                    SlotKind::TagEnumView(_) => return self.builder.build_bitcast(r, ptr_u8),
                     SlotKind::Int64 => (
                         "haxe_box_int64_ptr",
                         IrType::I64,
