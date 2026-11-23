@@ -1272,7 +1272,25 @@ impl<'a> AstLowering<'a> {
                 }
                 // Instance call: lower the receiver to find its class, then
                 // look up the method in that class's scope.
-                let receiver_typed = self.lower_expression(obj).ok()?;
+                // A call receiver lowers once, with its own callback hints, so
+                // its type is the one the call itself sees.
+                let address = &**obj as *const Expr as usize;
+                let receiver_typed = if let Some((_, lowered)) = self
+                    .hinted_receiver
+                    .as_ref()
+                    .filter(|(hinted, _)| *hinted == address)
+                {
+                    lowered.clone()
+                } else if matches!(obj.kind, ExprKind::Call { .. }) {
+                    let suppressed = std::mem::replace(&mut self.suppress_callee_hint, false);
+                    let lowered = self.lower_expression(obj);
+                    self.suppress_callee_hint = suppressed;
+                    let lowered = lowered.ok()?;
+                    self.hinted_receiver = Some((address, lowered.clone()));
+                    lowered
+                } else {
+                    self.lower_expression(obj).ok()?
+                };
                 let receiver_type_id = receiver_typed.expr_type;
                 let method_name = self.context.string_interner.intern(field);
                 if let Some(storage) = self.forwarded_method_receiver(receiver_type_id, method_name)
@@ -1314,7 +1332,8 @@ impl<'a> AstLowering<'a> {
                     let (params, ret) = {
                         let tt = self.context.type_table.borrow();
                         match name {
-                            "map" => (vec![elem], tt.dynamic_type()),
+                            // `map<S>` takes S from what the callback returns.
+                            "map" => (vec![elem], tt.unknown_type()),
                             "filter" => (vec![elem], tt.bool_type()),
                             "sort" => (vec![elem, elem], tt.int_type()),
                             _ => return None,

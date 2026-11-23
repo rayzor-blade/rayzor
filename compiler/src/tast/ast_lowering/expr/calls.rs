@@ -3468,12 +3468,15 @@ impl<'a> AstLowering<'a> {
         // resolution during that lowering so a chain of call receivers stays
         // O(depth) instead of O(2^depth) — otherwise `WorkerPool.parallelRows`
         // and similar bodies hang the compiler. See `suppress_callee_hint`.
+        let mut hinted_receiver = None;
         let (expected_param_types, expected_arg_types) = if self.suppress_callee_hint {
             (None, None)
         } else {
             self.suppress_callee_hint = true;
+            self.hinted_receiver = None;
             let p = self.resolve_callee_param_types(expr);
             let a = self.resolve_callee_formal_param_types(expr);
+            hinted_receiver = self.hinted_receiver.take();
             self.suppress_callee_hint = false;
             (p, a)
         };
@@ -4618,7 +4621,12 @@ impl<'a> AstLowering<'a> {
                 }
 
                 // Not a static call, proceed with instance method call
-                let mut receiver_expr = self.lower_expression(obj_expr)?;
+                let mut receiver_expr = match hinted_receiver.take() {
+                    Some((address, lowered)) if address == &**obj_expr as *const Expr as usize => {
+                        lowered
+                    }
+                    _ => self.lower_expression(obj_expr)?,
+                };
                 receiver_expr.expr_type = self.late_array_alias(receiver_expr.expr_type);
                 let method_name = self.context.intern_string(field);
 

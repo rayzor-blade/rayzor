@@ -1771,6 +1771,10 @@ pub struct AstLowering<'a> {
     /// the hint at every level. The real per-call hint is still computed when
     /// that nested call is lowered for real, outside this guard.
     suppress_callee_hint: bool,
+    /// A call-valued receiver the hint pass lowered with its own hints, keyed
+    /// by the receiver's address; the method call reuses it instead of
+    /// lowering it again.
+    hinted_receiver: Option<(usize, TypedExpression)>,
     /// The expander kept alive from expansion, for re-running the macro calls
     /// it deferred (typer-dependent bodies). See `macro_defer`.
     deferred_macro_expander: Option<&'a std::cell::RefCell<crate::macro_system::MacroExpander>>,

@@ -94,6 +94,7 @@ impl<'a> AstLowering<'a> {
             expected_lambda_params_stack: Vec::new(),
             expected_arg_type_stack: Vec::new(),
             suppress_callee_hint: false,
+            hinted_receiver: None,
             deferred_macro_expander: None,
             deferred_macro_template: None,
             deferred_macro_registry: None,
