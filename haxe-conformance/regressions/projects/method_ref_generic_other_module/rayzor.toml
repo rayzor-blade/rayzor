@@ -1,0 +1,5 @@
+[project]
+name = "method-ref-generic-other-module"
+entry = "./MethodRefGenericOtherModule.hx"
+[build]
+class-paths = ["."]

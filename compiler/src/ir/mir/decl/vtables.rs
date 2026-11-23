@@ -1561,7 +1561,18 @@ impl<'a> HirToMirContext<'a> {
         method_func_id: IrFunctionId,
         method_sig: IrFunctionSignature,
     ) -> Option<IrFunctionId> {
-        self.build_method_ref_thunk(method_func_id, method_sig, false)
+        self.build_method_ref_thunk(method_func_id, method_sig, false, None)
+    }
+
+    /// The thunk for a generic method whose value's type binds every type
+    /// variable: it calls the instance for `type_args`.
+    pub(crate) fn ensure_bound_method_ref_thunk(
+        &mut self,
+        method_func_id: IrFunctionId,
+        method_sig: IrFunctionSignature,
+        type_args: Vec<IrType>,
+    ) -> Option<IrFunctionId> {
+        self.build_method_ref_thunk(method_func_id, method_sig, false, Some(type_args))
     }
 
     /// A method value of a runtime-mapped extern (`map.keys`): a closure over
@@ -1600,7 +1611,7 @@ impl<'a> HirToMirContext<'a> {
             .signature
             .clone();
         dispatch_sig.parameters.remove(0);
-        self.build_method_ref_thunk(dispatch, dispatch_sig, true)
+        self.build_method_ref_thunk(dispatch, dispatch_sig, true, None)
     }
 
     /// `pass_env` forwards the closure env ahead of the receiver.
@@ -1609,8 +1620,10 @@ impl<'a> HirToMirContext<'a> {
         method_func_id: IrFunctionId,
         method_sig: IrFunctionSignature,
         pass_env: bool,
+        type_args: Option<Vec<IrType>>,
     ) -> Option<IrFunctionId> {
-        if let Some(cached) = self.method_ref_thunks.get(&method_func_id) {
+        let key = (method_func_id, type_args);
+        if let Some(cached) = self.method_ref_thunks.get(&key) {
             return Some(*cached);
         }
 
@@ -1631,7 +1644,13 @@ impl<'a> HirToMirContext<'a> {
 
         let thunk_symbol = SymbolId::from_raw(u32::MAX - 2000 - self.next_wrapper_id);
         self.next_wrapper_id += 1;
-        let thunk_name = format!("__method_ref_thunk_{}", method_func_id.0);
+        let thunk_name = match &key.1 {
+            Some(_) => format!(
+                "__method_ref_thunk_{}_{}",
+                method_func_id.0, self.next_wrapper_id
+            ),
+            None => format!("__method_ref_thunk_{}", method_func_id.0),
+        };
 
         // Save outer function/block state — thunk generation may run *during*
         // lowering of another function (e.g. `var f = obj.m;` inside main).
@@ -1742,6 +1761,12 @@ impl<'a> HirToMirContext<'a> {
                     self.build_class_slot_call(pointer, call_args, params, ret_ty.clone())
                 })
             }
+            None if key.1.is_some() => self.builder.build_call_direct_with_type_args(
+                method_func_id,
+                call_args,
+                ret_ty.clone(),
+                key.1.clone().unwrap_or_default(),
+            ),
             None if !method_sig.type_params.is_empty() => {
                 self.builder.build_call_direct_with_type_args(
                     method_func_id,
@@ -1769,7 +1794,7 @@ impl<'a> HirToMirContext<'a> {
         self.symbol_map = saved_symbol_map;
         self.strict_move_locals = saved_strict_move_locals;
 
-        self.method_ref_thunks.insert(method_func_id, thunk_id);
+        self.method_ref_thunks.insert(key, thunk_id);
         Some(thunk_id)
     }
 

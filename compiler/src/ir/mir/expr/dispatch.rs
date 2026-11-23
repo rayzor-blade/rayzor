@@ -1072,7 +1072,7 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::MethodReference {
                 receiver,
                 method_symbol,
-            } => self.lower_method_reference(receiver, *method_symbol),
+            } => self.lower_method_reference(receiver, *method_symbol, expr.ty),
 
             HirExprKind::Array { elements } => self.lower_array_literal(elements, expr.ty),
 

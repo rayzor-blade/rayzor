@@ -239,7 +239,7 @@ pub struct HirToMirContext<'a> {
     /// and forwards to the method after loading `this` from `env[0]`.
     /// Cached so `var f = obj.m; var g = obj.m;` reuses one thunk per
     /// underlying method.
-    method_ref_thunks: BTreeMap<IrFunctionId, IrFunctionId>,
+    method_ref_thunks: BTreeMap<(IrFunctionId, Option<Vec<IrType>>), IrFunctionId>,
 
     /// Thunks for virtual/interface dispatch slots. The generic indirect-call
     /// ABI prepends a closure env pointer, while class methods are declared as

@@ -607,6 +607,7 @@ impl<'a> HirToMirContext<'a> {
         &mut self,
         receiver: &HirExpr,
         method_symbol: SymbolId,
+        value_ty: TypeId,
     ) -> Option<IrId> {
         let receiver_reg = self.lower_expression(receiver)?;
         if self
@@ -626,13 +627,29 @@ impl<'a> HirToMirContext<'a> {
             return self.builder.build_function_ref(target);
         }
         let thunk_id = match self.function_map.get(&method_symbol) {
-            Some(&id) => self.ensure_method_ref_thunk(id)?,
+            Some(&id) => {
+                let sig = self.builder.module.functions.get(&id)?.signature.clone();
+                let names: Vec<String> = sig.type_params.iter().map(|p| p.name.clone()).collect();
+                match self.bound_method_reference_type_args(method_symbol, &names, value_ty) {
+                    Some((args, value_ty)) => {
+                        let sig = self.bound_thunk_signature(sig, value_ty);
+                        self.ensure_bound_method_ref_thunk(id, sig, args)?
+                    }
+                    None => self.ensure_method_ref_thunk(id)?,
+                }
+            }
             // A method compiled in another module: its parameter types were
             // recorded at import, its return type is the symbol's.
             None => match self.external_function_map.get(&method_symbol) {
                 Some(&id) => {
                     let sig = self.external_method_signature(id, method_symbol)?;
-                    self.ensure_method_ref_thunk_with_sig(id, sig)?
+                    match self.bound_method_reference_type_args(method_symbol, &[], value_ty) {
+                        Some((args, value_ty)) => {
+                            let sig = self.bound_thunk_signature(sig, value_ty);
+                            self.ensure_bound_method_ref_thunk(id, sig, args)?
+                        }
+                        None => self.ensure_method_ref_thunk_with_sig(id, sig)?,
+                    }
                 }
                 // A runtime-mapped extern method has no function of its own.
                 None => self.mapped_method_ref_thunk(receiver.ty, method_symbol)?,
@@ -647,6 +664,119 @@ impl<'a> HirToMirContext<'a> {
             .build_make_closure(thunk_id, vec![receiver_reg])
     }
 
+    /// The type arguments of a method value, from its own type or else from
+    /// the slot it initializes: the reference itself is typed generic.
+    fn bound_method_reference_type_args(
+        &self,
+        method_symbol: SymbolId,
+        names: &[String],
+        value_ty: TypeId,
+    ) -> Option<(Vec<IrType>, TypeId)> {
+        self.method_reference_type_args(method_symbol, names, value_ty)
+            .map(|args| (args, value_ty))
+            .or_else(|| {
+                let target = self.let_target_type_hint?;
+                self.method_reference_type_args(method_symbol, names, target)
+                    .map(|args| (args, target))
+            })
+    }
+
+    /// A bound thunk takes and returns the value's own types, as any closure
+    /// of that type does; the instance it calls is typed alike.
+    fn bound_thunk_signature(
+        &self,
+        mut sig: IrFunctionSignature,
+        value_ty: TypeId,
+    ) -> IrFunctionSignature {
+        if let Some(crate::tast::TypeKind::Function {
+            params,
+            return_type,
+            ..
+        }) = self
+            .type_table
+            .get(self.resolve_through_aliases(value_ty))
+            .map(|t| &t.kind)
+        {
+            if params.len() + 1 == sig.parameters.len() {
+                for (param, &ty) in sig.parameters.iter_mut().skip(1).zip(params) {
+                    param.ty = self.convert_type(ty);
+                }
+                sig.return_type = self.convert_type(*return_type);
+            }
+        }
+        sig
+    }
+
+    /// The type arguments a method value's own type binds, in the order of
+    /// `names`, the method's type parameters. With `names` unknown only a
+    /// single variable has an order. None while any variable stays open.
+    fn method_reference_type_args(
+        &self,
+        method_symbol: SymbolId,
+        names: &[String],
+        value_ty: TypeId,
+    ) -> Option<Vec<IrType>> {
+        let method_ty = self.symbol_table.get_symbol(method_symbol)?.type_id;
+        let function = |ty: TypeId| match self.type_table.get(ty).map(|t| &t.kind) {
+            Some(crate::tast::TypeKind::Function {
+                params,
+                return_type,
+                ..
+            }) => Some((params.clone(), *return_type)),
+            _ => None,
+        };
+        let (declared, declared_ret) = function(method_ty)?;
+        let (actual, actual_ret) = function(self.resolve_through_aliases(value_ty))?;
+        if declared.len() != actual.len() {
+            return None;
+        }
+        let mut variables = BTreeMap::new();
+        let mut bindings = BTreeMap::new();
+        for (&formal, &arg) in declared
+            .iter()
+            .zip(&actual)
+            .chain([(&declared_ret, &actual_ret)])
+        {
+            self.bind_type_parameters(formal, formal, &mut variables, 0);
+            self.bind_type_parameters(formal, arg, &mut bindings, 0);
+        }
+        if variables.is_empty() {
+            return None;
+        }
+        let bound = |symbol: &SymbolId| {
+            let ty = *bindings.get(symbol)?;
+            let open = matches!(
+                self.type_table
+                    .get(self.resolve_through_aliases(ty))
+                    .map(|t| &t.kind),
+                Some(
+                    crate::tast::TypeKind::TypeParameter { .. }
+                        | crate::tast::TypeKind::Unknown
+                        | crate::tast::TypeKind::Placeholder { .. }
+                )
+            );
+            (!open).then(|| self.convert_type_arg(ty))
+        };
+        if names.is_empty() {
+            let [variable] = variables.keys().collect::<Vec<_>>()[..] else {
+                return None;
+            };
+            return Some(vec![bound(variable)?]);
+        }
+        names
+            .iter()
+            .map(|name| {
+                let symbol = variables.keys().find(|symbol| {
+                    self.symbol_table
+                        .get_symbol(**symbol)
+                        .and_then(|s| self.string_interner.get(s.name))
+                        == Some(name.as_str())
+                })?;
+                bound(symbol)
+            })
+            .collect()
+    }
+
     pub(crate) fn external_method_signature(
         &mut self,
         func_id: IrFunctionId,
@@ -654,10 +784,20 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrFunctionSignature> {
         let params = self.external_function_param_types.get(&func_id)?.clone();
         let method_ty = self.symbol_table.get_symbol(method_symbol)?.type_id;
-        let return_type = match &self.type_table.get(method_ty)?.kind {
-            crate::tast::TypeKind::Function { return_type, .. } => *return_type,
+        let (declared, return_type) = match &self.type_table.get(method_ty)?.kind {
+            crate::tast::TypeKind::Function {
+                params,
+                return_type,
+                ..
+            } => (params.clone(), *return_type),
             _ => return None,
         };
+        // A generic method's thunk calls an instance, not the template, so the
+        // signature counts the type variables its declared type names.
+        let mut variables = BTreeMap::new();
+        for &ty in declared.iter().chain(std::iter::once(&return_type)) {
+            self.bind_type_parameters(ty, ty, &mut variables, 0);
+        }
         let return_type = self.convert_type(return_type);
         let mut sig = FunctionSignatureBuilder::new()
             .returns(return_type)
@@ -665,6 +805,13 @@ impl<'a> HirToMirContext<'a> {
         for (i, ty) in params.into_iter().enumerate() {
             sig = sig.param(format!("p{i}"), ty);
         }
-        Some(sig.build())
+        let mut sig = sig.build();
+        sig.type_params = (0..variables.len())
+            .map(|i| crate::ir::IrTypeParam {
+                name: format!("T{i}"),
+                constraints: Vec::new(),
+            })
+            .collect();
+        Some(sig)
     }
 }

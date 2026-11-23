@@ -113,7 +113,10 @@ impl<'a> HirToMirContext<'a> {
                     // The declared slot type determines a literal's array layout.
                     // Generic call results also use it to select their unbox.
                     let prev_let_hint = self.let_target_type_hint.take();
-                    if matches!(&init_expr.kind, HirExprKind::Call { .. }) {
+                    if matches!(
+                        &init_expr.kind,
+                        HirExprKind::Call { .. } | HirExprKind::MethodReference { .. }
+                    ) {
                         self.let_target_type_hint = *type_hint;
                     }
                     let value = if let (HirExprKind::Array { elements }, Some(target_ty)) =
