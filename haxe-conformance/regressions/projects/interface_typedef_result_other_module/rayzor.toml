@@ -1,0 +1,5 @@
+[project]
+name = "interface-typedef-result-other-module"
+entry = "./InterfaceTypedefResultOtherModule.hx"
+[build]
+class-paths = ["."]

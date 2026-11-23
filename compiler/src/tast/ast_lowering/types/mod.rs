@@ -1251,11 +1251,34 @@ impl<'a> AstLowering<'a> {
                     && deferred_type.location.byte_offset == 0;
                 let loadable = self.user_file && deferred_type.type_name.contains('.');
                 // A qualified name another module declares later is resolved then.
-                if deferred_type.type_name.contains('.') && deferred_type.type_params.is_empty() {
-                    self.context.type_table.borrow_mut().defer_placeholder(
-                        deferred_type.type_name.clone(),
-                        deferred_type.target_type_id,
-                    );
+                // A simple name is one of this package's types, as an interface's
+                // signatures name a typedef of their module before it is lowered.
+                if deferred_type.type_params.is_empty() {
+                    let qualified = if deferred_type.type_name.contains('.') {
+                        Some(deferred_type.type_name.clone())
+                    } else {
+                        self.context
+                            .current_package
+                            .and_then(|package| {
+                                self.context.namespace_resolver.get_package(package)
+                            })
+                            .filter(|package| !package.full_path.is_empty())
+                            .map(|package| {
+                                package
+                                    .full_path
+                                    .iter()
+                                    .filter_map(|part| self.context.string_interner.get(*part))
+                                    .chain(std::iter::once(deferred_type.type_name.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .join(".")
+                            })
+                    };
+                    if let Some(qualified) = qualified {
+                        self.context
+                            .type_table
+                            .borrow_mut()
+                            .defer_placeholder(qualified, deferred_type.target_type_id);
+                    }
                 }
                 if !is_internal || loadable {
                     self.context.errors.push(LoweringError::UnresolvedType {
