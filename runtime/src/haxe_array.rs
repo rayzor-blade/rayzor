@@ -159,10 +159,12 @@ fn encode_slot(arr: *mut HaxeArray, bits: i64, tag: i32, metadata: u64) -> i64 {
     if unsafe { (*arr).len == 0 && stored_slot_layout(&*arr).is_none() } {
         haxe_array_init_element_tag(arr, tag);
     }
-    if crate::erased_word::is_word_tag(tag) {
+    // A raw hint's value is the element itself, not a word.
+    if crate::erased_word::is_word_tag(tag) && !crate::erased_word::is_raw_hint(tag) {
         apply_kind_hint(arr, tag);
         word_to_slot(arr, bits)
     } else {
+        let tag = crate::erased_word::element_tag(tag);
         encode_typed_array_slot(unsafe { &*arr }, bits, tag, metadata)
     }
 }
@@ -206,6 +208,12 @@ pub(crate) fn stored_slot_layout(array: &HaxeArray) -> Option<u64> {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_get_typed(arr: *const HaxeArray, index: i64, tag: i32) -> i64 {
     use crate::type_system::*;
+    // A raw hint's reader takes the element itself, not a word.
+    let tag = if crate::erased_word::is_raw_hint(tag) {
+        crate::erased_word::element_tag(tag)
+    } else {
+        tag
+    };
     let null = if tag == ValueTag::NullInt as i32 {
         NULL_INT
     } else {
@@ -400,7 +408,9 @@ pub extern "C" fn haxe_array_insert_typed(
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_array_take_typed(arr: *mut HaxeArray, from_end: bool, tag: i32) -> i64 {
     if arr.is_null() || unsafe { (*arr).len } == 0 {
-        return if tag == crate::type_system::ValueTag::NullInt as i32 {
+        return if crate::erased_word::element_tag(tag)
+            == crate::type_system::ValueTag::NullInt as i32
+        {
             crate::type_system::NULL_INT
         } else {
             0

@@ -2645,6 +2645,52 @@ pub extern "C" fn haxe_box_reference_ptr(val: i32, _dummy: i32) -> i32 {
     unsafe { alloc_dynamic(TYPE_REFERENCE, val as u32) }
 }
 
+/// The null of a type parameter's value: `NULL_INT` for a `Null<Int>` or
+/// tag-only enum binding, else 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_generic_null(type_tag: i32) -> i64 {
+    let element = if type_tag & 0xff == 15 {
+        (type_tag >> 8) & 0xff
+    } else {
+        type_tag
+    };
+    if element == 10 { 1 << 32 } else { 0 }
+}
+
+/// A `Null<T>` read as its `T` by the binding's tag; a reference is itself.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_generic_from_nullable(value: i32, type_tag: i32) -> i64 {
+    let element = if type_tag & 0xff == 15 {
+        (type_tag >> 8) & 0xff
+    } else {
+        type_tag
+    };
+    match element {
+        10 => haxe_null_int_from_dynamic(value),
+        1 if value != 0 => i64::from(haxe_unbox_int_ptr(value)),
+        4 if value != 0 => haxe_unbox_float_ptr(value).to_bits() as i64,
+        2 => i64::from(haxe_unbox_bool_ptr(value)),
+        1 | 4 => 0,
+        _ => i64::from(value),
+    }
+}
+
+static ENUM_TAG_BOXES: Mutex<std::collections::BTreeMap<(i32, i64), i32>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// The Dynamic view of a tag-only enum value, one box per (enum, value)
+/// owned here; `NULL_INT` is null.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_enum_tag_dynamic(type_id: i32, tag: i64) -> i32 {
+    if tag == 1 << 32 {
+        return 0;
+    }
+    let mut boxes = ENUM_TAG_BOXES.lock().unwrap();
+    *boxes
+        .entry((type_id, tag))
+        .or_insert_with(|| unsafe { alloc_dynamic(TYPE_REFERENCE, tag as u32) })
+}
+
 /// Unbox an Int from DynamicValue pointer (ptr-returning variant).
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_unbox_int_ptr(ptr: i32) -> i32 {

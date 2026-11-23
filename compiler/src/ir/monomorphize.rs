@@ -1351,7 +1351,9 @@ impl Monomorphizer {
                 .substitution_map
                 .get(name)
                 .map(|bound| {
-                    if matches!(bound, IrType::Ptr(inner) if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_int64")) {
+                    if matches!(bound, IrType::Ptr(inner) if matches!(&**inner, IrType::Opaque { name, .. } if name == "__haxe_int64"))
+                        || bound.tag_enum_id().is_some()
+                    {
                         IrType::I64
                     } else {
                         bound.clone()

@@ -388,6 +388,14 @@ impl<'a> HirToMirContext<'a> {
                     stable => stable,
                 };
 
+                // A tag-only enum's discriminant has the runtime's own view.
+                if let Some(TypeKind::Enum { symbol_id, .. }) = &value_kind_cloned
+                    && !self.enum_is_boxed(*symbol_id)
+                    && self.builder.get_register_type(value) == Some(IrType::I64)
+                {
+                    return self.build_tag_enum_dynamic(*symbol_id, value);
+                }
+
                 let type_id_const = self.builder.build_const(IrValue::U32(type_id_u32))?;
 
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
@@ -398,25 +406,11 @@ impl<'a> HirToMirContext<'a> {
                     ptr_u8.clone(),
                 );
 
-                let boxed = self.builder.build_call_direct(
+                self.builder.build_call_direct(
                     box_func_id,
                     vec![value, type_id_const],
                     ptr_u8.clone(),
-                )?;
-                // A tag-only enum's `NULL_INT` is a null Dynamic.
-                let tag_only_enum = matches!(
-                    &value_kind_cloned,
-                    Some(TypeKind::Enum { symbol_id, .. }) if !self.enum_is_boxed(*symbol_id)
-                ) && self.builder.get_register_type(value) == Some(IrType::I64);
-                if !tag_only_enum {
-                    return Some(boxed);
-                }
-                let null = self.builder.build_const(IrValue::null_int())?;
-                let absent = self.builder.build_cmp(CompareOp::Eq, value, null)?;
-                let bits = self.builder.build_bitcast(boxed, IrType::I64)?;
-                let zero = self.builder.build_const(IrValue::I64(0))?;
-                let out = self.builder.build_select(absent, zero, bits)?;
-                self.builder.build_bitcast(out, ptr_u8)
+                )
             }
 
             Some(TypeKind::Function { .. }) => {
@@ -546,6 +540,161 @@ impl<'a> HirToMirContext<'a> {
             function.type_param_metadata_fixups.push((metadata, name));
         }
         Some((tag, metadata))
+    }
+
+    /// The null of a value typed as one of this function's type parameters:
+    /// `NULL_INT` once specialization binds it to a type whose null that is,
+    /// else 0. None for any other type.
+    pub(crate) fn type_param_null(&mut self, ty: TypeId) -> Option<IrId> {
+        let name = self
+            .resolve_type_param_name(self.resolve_through_aliases(ty))
+            .filter(|name| self.current_type_param_names().contains(name))?;
+        let (tag, _) = self.type_param_value_descriptor(name, 0)?;
+        let null = self.get_or_register_extern_function(
+            "haxe_generic_null",
+            vec![IrType::I32],
+            IrType::I64,
+        );
+        self.builder.build_call_direct(null, vec![tag], IrType::I64)
+    }
+
+    /// A `Null<T>` of this function opened to its `T` by the tag
+    /// specialization gives `T`. A value typed `Null<T>` opens only into this
+    /// function's own `T`: another signature's parameter may be bound to the
+    /// `Null<T>` itself. One a null test narrowed to `T` while its register
+    /// still holds the view opens for any bare type parameter. None otherwise.
+    pub(crate) fn type_param_from_optional(
+        &mut self,
+        value: IrId,
+        value_ty: TypeId,
+        target_ty: TypeId,
+    ) -> Option<IrId> {
+        let target = self.resolve_through_aliases(target_ty);
+        if !matches!(
+            self.type_table.get(target).map(|t| &t.kind),
+            Some(TypeKind::TypeParameter { .. })
+        ) {
+            return None;
+        }
+        let register = self.builder.get_register_type(value);
+        let name = match self
+            .type_table
+            .get(self.resolve_through_aliases(value_ty))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Optional { inner_type }) => {
+                let inner =
+                    self.resolve_type_param_name(self.resolve_through_aliases(*inner_type))?;
+                (self.resolve_type_param_name(target).as_ref() == Some(&inner)).then_some(inner)?
+            }
+            Some(TypeKind::TypeParameter { .. })
+                if register == Some(IrType::Ptr(Box::new(IrType::U8))) =>
+            {
+                self.resolve_type_param_name(self.resolve_through_aliases(value_ty))?
+            }
+            _ => return None,
+        };
+        if !self.current_type_param_names().contains(&name)
+            || !matches!(register, Some(IrType::Ptr(_)))
+        {
+            return None;
+        }
+        let bits = self.open_nullable_type_param(value, name)?;
+        let own = self
+            .resolve_type_param_name(self.resolve_through_aliases(target_ty))
+            .is_some_and(|target| self.current_type_param_names().contains(&target));
+        if !own {
+            return Some(bits);
+        }
+        self.builder
+            .build_bitcast(bits, self.convert_type(target_ty))
+    }
+
+    /// A `Null<N>` argument for a method formal typed as one of its class's
+    /// parameters, which the receiver binds to this function's own `N`: the
+    /// slot holds `N`'s form, so the view opens. None for any other binding.
+    pub(crate) fn receiver_bound_param_from_optional(
+        &mut self,
+        callee: IrFunctionId,
+        index: usize,
+        receiver: TypeId,
+        arg: &HirExpr,
+        value: IrId,
+    ) -> Option<IrId> {
+        let inner = match self
+            .type_table
+            .get(self.resolve_through_aliases(arg.ty))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Optional { inner_type }) => *inner_type,
+            _ => return None,
+        };
+        let name = self
+            .resolve_type_param_name(self.resolve_through_aliases(inner))
+            .filter(|name| self.current_type_param_names().contains(name))?;
+        if !matches!(self.builder.get_register_type(value), Some(IrType::Ptr(_))) {
+            return None;
+        }
+        let formal = match self
+            .type_table
+            .get(self.resolve_through_aliases(self.declared_formal_type(callee, index)?))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::TypeParameter { symbol_id, .. }) => *symbol_id,
+            _ => return None,
+        };
+        let mut receiver = self.resolve_through_aliases(receiver);
+        if let Some(TypeKind::Optional { inner_type }) =
+            self.type_table.get(receiver).map(|t| &t.kind)
+        {
+            receiver = self.resolve_through_aliases(*inner_type);
+        }
+        let (class, class_args) = match self.type_table.get(receiver).map(|t| &t.kind) {
+            Some(TypeKind::Class {
+                symbol_id,
+                type_args,
+            }) => (*symbol_id, type_args.clone()),
+            Some(TypeKind::GenericInstance {
+                base_type,
+                type_args,
+                ..
+            }) => match self.type_table.get(*base_type).map(|t| &t.kind) {
+                Some(TypeKind::Class { symbol_id, .. }) => (*symbol_id, type_args.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let position = self
+            .symbol_table
+            .get_class_type_params(class)?
+            .iter()
+            .position(|ty| {
+                matches!(
+                    self.type_table.get(*ty).map(|t| &t.kind),
+                    Some(TypeKind::TypeParameter { symbol_id, .. }) if *symbol_id == formal
+                )
+            })?;
+        let bound =
+            self.resolve_type_param_name(self.resolve_through_aliases(*class_args.get(position)?));
+        if bound.as_ref() != Some(&name) {
+            return None;
+        }
+        self.open_nullable_type_param(value, name)
+    }
+
+    /// A `Null<N>` view opened to `N`'s raw form by the tag specialization
+    /// gives `N`.
+    fn open_nullable_type_param(&mut self, value: IrId, name: String) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let view = self.builder.build_bitcast(value, ptr_u8.clone())?;
+        let (tag, _) = self.type_param_value_descriptor(name, 0)?;
+        let open = self.get_or_register_extern_function(
+            "haxe_generic_from_nullable",
+            vec![ptr_u8, IrType::I32],
+            IrType::I64,
+        );
+        self.builder
+            .build_call_direct(open, vec![view, tag], IrType::I64)
     }
 
     /// A refined arm can become a boxed result when its type parameter stays existential.
@@ -1191,15 +1340,13 @@ impl<'a> HirToMirContext<'a> {
                 .build_call_direct(box_func, vec![v64, tag_reg, metadata], ptr_u8);
         }
 
-        // A `Null<E>` over a tag-only enum carries the discriminant raw, null
-        // as 0; the enum's own null is `NULL_INT`.
+        // A `Null<E>` over a tag-only enum is its Dynamic view, so the first
+        // constructor is not null; the enum's own null is `NULL_INT`.
         if self.is_tag_only_enum_type(inner_type)
             && self.builder.get_register_type(value) == Some(IrType::I64)
         {
-            let null = self.builder.build_const(IrValue::null_int())?;
-            let absent = self.builder.build_cmp(CompareOp::Eq, value, null)?;
-            let zero = self.builder.build_const(IrValue::I64(0))?;
-            return self.builder.build_select(absent, zero, value);
+            let enum_symbol = self.resolve_enum_symbol(inner_type)?;
+            return self.build_tag_enum_dynamic(enum_symbol, value);
         }
 
         // Only box genuine primitive *value* types. An IR-type check alone is
@@ -1317,6 +1464,12 @@ impl<'a> HirToMirContext<'a> {
     ) -> Option<IrId> {
         use crate::tast::TypeKind;
 
+        if let Some(discriminant) = self.tag_enum_from_optional(value, value_ty, target_ty) {
+            return Some(discriminant);
+        }
+        if let Some(opened) = self.type_param_from_optional(value, value_ty, target_ty) {
+            return Some(opened);
+        }
         // `Null<Int>` on either side converts by the target's IR type.
         if self.is_null_int_type(target_ty) {
             return self.to_null_int_typed(value, value_ty);
@@ -1848,7 +2001,8 @@ impl<'a> HirToMirContext<'a> {
             match self.type_table.get(nullable).map(|ty| &ty.kind) {
                 Some(TypeKind::TypeAlias { target_type, .. }) => nullable = *target_type,
                 Some(TypeKind::Optional { inner_type })
-                    if self.optional_inner_is_boxable_primitive(*inner_type)
+                    if (self.optional_inner_is_boxable_primitive(*inner_type)
+                        || self.is_tag_only_enum_type(*inner_type))
                         && !self.is_int64_type(*inner_type)
                         && matches!(self.convert_type(call_ty), IrType::Ptr(_)) =>
                 {
@@ -1924,6 +2078,11 @@ impl<'a> HirToMirContext<'a> {
                 .map(|ty| &ty.kind),
             Some(TypeKind::Dynamic)
         ) {
+            return Some(call_result);
+        }
+        // A tag-only enum result takes the caller's form in `lower_call`,
+        // which knows whether the callee returns `T` or `Null<T>`.
+        if self.is_tag_only_enum_type(resolved) {
             return Some(call_result);
         }
         let target = if self.resolve_enum_symbol(resolved).is_some() {
@@ -2256,8 +2415,17 @@ impl<'a> HirToMirContext<'a> {
         value_ty: TypeId,
         target_ty: TypeId,
     ) -> Option<IrId> {
+        if let Some(discriminant) = self.tag_enum_from_optional(value, value_ty, target_ty) {
+            return Some(discriminant);
+        }
         // Enum slots are pointer-sized values even when their MIR type is I64.
-        if self.resolve_enum_symbol(target_ty).is_some()
+        // A `Null<E>` over a tag-only enum is already its view.
+        let tag_enum_view = matches!(
+            self.type_table.get(self.resolve_through_aliases(target_ty)).map(|t| &t.kind),
+            Some(TypeKind::Optional { inner_type }) if self.is_tag_only_enum_type(*inner_type)
+        );
+        if !tag_enum_view
+            && self.resolve_enum_symbol(target_ty).is_some()
             && matches!(self.builder.get_register_type(value), Some(IrType::Ptr(_)))
         {
             return self.unbox_generic_value(value, target_ty);

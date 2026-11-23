@@ -134,6 +134,27 @@ impl IrType {
         }))
     }
 
+    /// A tag-only enum bound to a type parameter. Specialization holds its
+    /// discriminant as an `I64`; the marker keeps the enum for by-tag helpers.
+    pub fn tag_enum(runtime_id: u32) -> Self {
+        Self::Ptr(Box::new(Self::Opaque {
+            name: format!("__haxe_tag_enum:{runtime_id}"),
+            size: 0,
+            align: 8,
+        }))
+    }
+
+    /// The runtime id a `tag_enum` marker names.
+    pub fn tag_enum_id(&self) -> Option<u32> {
+        match self {
+            Self::Ptr(inner) => match &**inner {
+                Self::Opaque { name, .. } => name.strip_prefix("__haxe_tag_enum:")?.parse().ok(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// A generic argument whose value is already a Dynamic box.
     pub fn dynamic_ptr() -> Self {
         Self::Ptr(Box::new(Self::Opaque {
@@ -227,6 +248,8 @@ impl IrType {
                 ValueTag::Int64
             }
             IrType::Ptr(inner) if matches!(&**inner, IrType::Array(_, _)) => ValueTag::Array,
+            // A discriminant uses the whole word and its null is `NULL_INT`.
+            _ if self.tag_enum_id().is_some() => ValueTag::NullInt,
             IrType::Ptr(_) => ValueTag::Reference,
             IrType::Function { .. } => ValueTag::Function,
             IrType::NullInt => ValueTag::NullInt,
@@ -246,6 +269,9 @@ impl IrType {
                         0
                     }
                 }
+                IrType::Opaque { .. } if let Some(id) = self.tag_enum_id() => {
+                    rayzor_runtime::type_system::TAG_ENUM_METADATA | (u64::from(id) << 8)
+                }
                 IrType::Opaque { name, .. } => name
                     .strip_prefix("__haxe_reference:")
                     .and_then(|id| id.parse::<u32>().ok())
@@ -260,6 +286,9 @@ impl IrType {
         use rayzor_runtime::type_system::ValueTag;
         if depth >= 7 {
             return 0;
+        }
+        if self.tag_enum_id().is_some() {
+            return 3;
         }
         match self.value_tag() {
             ValueTag::Int => 3,

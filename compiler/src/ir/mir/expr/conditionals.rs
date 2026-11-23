@@ -1102,7 +1102,9 @@ impl<'a> HirToMirContext<'a> {
                     let z = if result_is_tag_enum {
                         self.builder.build_const(IrValue::null_int())
                     } else {
-                        self.zero_of_ir_type(&else_rty.clone().unwrap())
+                        result_ty
+                            .and_then(|t| self.type_param_null(t))
+                            .or_else(|| self.zero_of_ir_type(&else_rty.clone().unwrap()))
                     };
                     if let Some(z) = z {
                         then_val = Some(z);
@@ -1120,7 +1122,9 @@ impl<'a> HirToMirContext<'a> {
                     let z = if result_is_tag_enum {
                         self.builder.build_const(IrValue::null_int())
                     } else {
-                        self.zero_of_ir_type(&then_rty.clone().unwrap())
+                        result_ty
+                            .and_then(|t| self.type_param_null(t))
+                            .or_else(|| self.zero_of_ir_type(&then_rty.clone().unwrap()))
                     };
                     if let Some(z) = z {
                         else_val = Some(z);

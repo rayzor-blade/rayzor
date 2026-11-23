@@ -3363,8 +3363,9 @@ pub extern "C" fn haxe_dynamic_is_null(ptr: *mut u8) -> bool {
     if ptr.is_null() {
         return true;
     }
+    // An enum box's payload 0 is its first constructor, not null.
     match dynamic_value_if_boxed(ptr) {
-        Some(d) => d.type_id == TYPE_NULL || d.value_ptr.is_null(),
+        Some(d) => d.type_id == TYPE_NULL || (d.value_ptr.is_null() && enum_box_slot(&d).is_none()),
         None => false,
     }
 }
@@ -3372,6 +3373,46 @@ pub extern "C" fn haxe_dynamic_is_null(ptr: *mut u8) -> bool {
 /// An unboxed `Null<Int>`: the Int sign-extended to 64 bits, and null this
 /// value, which lies outside the i32 range and truncates to 0.
 pub const NULL_INT: i64 = 1 << 32;
+
+/// The null of a type parameter's value by its binding's tag: `NULL_INT`
+/// for a `Null<Int>` or a tag-only enum, whose slots hold the raw value,
+/// else 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_generic_null(type_tag: i32) -> i64 {
+    if crate::erased_word::element_tag(type_tag) == ValueTag::NullInt as i32 {
+        NULL_INT
+    } else {
+        0
+    }
+}
+
+/// A `Null<T>` read as its `T` in a generic body, by the binding's tag: a
+/// scalar opens from its word or box, a `Null<Int>` or tag-only enum from its
+/// view (null is `NULL_INT`), and a reference is itself.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_generic_from_nullable(value: *mut u8, type_tag: i32) -> i64 {
+    match ValueTag::from_i32(crate::erased_word::element_tag(type_tag)) {
+        Some(ValueTag::NullInt) => haxe_null_int_from_dynamic(value),
+        // A word or box opens; a raw Int is itself.
+        Some(ValueTag::Int) => haxe_coerce_dynamic_to_int(value) as i32 as i64,
+        Some(ValueTag::Float) if !value.is_null() => haxe_unbox_float_ptr(value).to_bits() as i64,
+        // A Bool binding's word is 6 or 7, and a raw Bool 0 or 1; neither is
+        // a box.
+        Some(ValueTag::Bool)
+            if crate::erased_word::kind(value as u64) == crate::erased_word::WordKind::Bool =>
+        {
+            i64::from(crate::erased_word::haxe_word_to_bool(value as u64))
+        }
+        Some(ValueTag::Bool) if (value as usize) < 0x1000 => i64::from(!value.is_null()),
+        Some(ValueTag::Bool) => i64::from(haxe_unbox_bool_ptr(value)),
+        Some(ValueTag::Float) => 0,
+        _ => value as i64,
+    }
+}
+
+/// Generic metadata naming a tag-only enum: this code, the enum's runtime id
+/// in the bits above it.
+pub const TAG_ENUM_METADATA: u64 = 11;
 
 /// A `Null<Int>` bound for a Dynamic slot: null for null, else an Int box.
 #[unsafe(no_mangle)]
@@ -4653,6 +4694,7 @@ pub extern "C" fn haxe_box_generic_ptr(value: i64, type_tag: i32, metadata: u64)
             haxe_box_class_instance(value as *mut u8)
         }
         6 if value != 0 => haxe_box_reference_ptr(value as *mut u8, (metadata >> 8) as u32),
+        TAG_ENUM_METADATA => haxe_enum_tag_dynamic((metadata >> 8) as u32, value),
         _ => haxe_box_typed_ptr(value, type_tag),
     }
 }
@@ -5213,6 +5255,32 @@ pub extern "C" fn haxe_enum_nullary_cell(type_id: u32, tag: i32) -> *mut u8 {
         value as usize
     });
     cell as *mut u8
+}
+
+static ENUM_TAG_BOXES: RwLock<Option<HashMap<(u32, i64), usize>>> = RwLock::new(None);
+
+/// The Dynamic view of a tag-only enum value, which is also its `Null<E>`:
+/// one reference box per (enum, discriminant), owned here, so a view never
+/// allocates per value and two views of one constructor are `==`.
+/// `NULL_INT`, the enum's null, is null.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_enum_tag_dynamic(type_id: u32, tag: i64) -> *mut u8 {
+    if tag == NULL_INT {
+        return std::ptr::null_mut();
+    }
+    if let Some(&boxed) = ENUM_TAG_BOXES
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|boxes| boxes.get(&(type_id, tag)))
+    {
+        return boxed as *mut u8;
+    }
+    let mut boxes = ENUM_TAG_BOXES.write().unwrap();
+    let boxes = boxes.get_or_insert_with(HashMap::new);
+    *boxes
+        .entry((type_id, tag))
+        .or_insert_with(|| haxe_box_reference_ptr(tag as *mut u8, type_id) as usize) as *mut u8
 }
 
 /// Safe downcast for class instances using object headers.

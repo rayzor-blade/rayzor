@@ -137,6 +137,66 @@ impl<'a> HirToMirContext<'a> {
             })
     }
 
+    /// A tag-only enum's discriminant as its Dynamic view, which is also its
+    /// `Null<E>`: the runtime's one box for that value, null for `NULL_INT`.
+    pub(crate) fn build_tag_enum_dynamic(
+        &mut self,
+        enum_symbol: SymbolId,
+        discriminant: IrId,
+    ) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let view = self.get_or_register_extern_function(
+            "haxe_enum_tag_dynamic",
+            vec![IrType::U32, IrType::I64],
+            ptr_u8.clone(),
+        );
+        let type_id = self
+            .builder
+            .build_const(IrValue::U32(self.enum_runtime_id(enum_symbol)))?;
+        self.builder
+            .build_call_direct(view, vec![type_id, discriminant], ptr_u8)
+    }
+
+    /// A `Null<E>` view read as the tag-only enum `E`: its discriminant, and
+    /// `NULL_INT` for null. None unless the value is such a view: typed
+    /// `Null<E>`, or typed `E` while its register still holds the view.
+    pub(crate) fn tag_enum_from_optional(
+        &mut self,
+        value: IrId,
+        value_ty: TypeId,
+        target_ty: TypeId,
+    ) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let register = self.builder.get_register_type(value);
+        let view = match self
+            .type_table
+            .get(self.resolve_through_aliases(value_ty))
+            .map(|t| &t.kind)
+        {
+            Some(TypeKind::Optional { inner_type }) => {
+                self.is_tag_only_enum_type(*inner_type) && matches!(register, Some(IrType::Ptr(_)))
+            }
+            _ => self.is_tag_only_enum_type(value_ty) && register.as_ref() == Some(&ptr_u8),
+        };
+        if !view || !self.is_tag_only_enum_type(target_ty) {
+            return None;
+        }
+        self.tag_enum_from_view(value)
+    }
+
+    /// A tag-only enum's discriminant from its view, `NULL_INT` from null.
+    pub(crate) fn tag_enum_from_view(&mut self, value: IrId) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let view = self.builder.build_bitcast(value, ptr_u8.clone())?;
+        let read = self.get_or_register_extern_function(
+            "haxe_null_int_from_dynamic",
+            vec![ptr_u8],
+            IrType::I64,
+        );
+        self.builder
+            .build_call_direct(read, vec![view], IrType::I64)
+    }
+
     /// The boxed form of a parameterless variant of an enum that has other
     /// parameterized variants: the runtime's one `[tag:i32][pad:i32]` cell for
     /// that enum and tag, so two evaluations of `None` are the same value.

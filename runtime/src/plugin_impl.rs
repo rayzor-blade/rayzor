@@ -550,6 +550,15 @@ register_symbol!(
     crate::type_system::haxe_enum_nullary_cell
 );
 register_symbol!(
+    "haxe_enum_tag_dynamic",
+    crate::type_system::haxe_enum_tag_dynamic
+);
+register_symbol!("haxe_generic_null", crate::type_system::haxe_generic_null);
+register_symbol!(
+    "haxe_generic_from_nullable",
+    crate::type_system::haxe_generic_from_nullable
+);
+register_symbol!(
     "haxe_enum_register_parameter",
     crate::type_system::haxe_enum_register_parameter
 );

@@ -33,6 +33,7 @@ impl<'a> HirToMirContext<'a> {
             callee,
             args,
             is_method,
+            type_args: hir_type_args,
             ..
         } = &expr.kind
         else {
@@ -198,6 +199,11 @@ impl<'a> HirToMirContext<'a> {
                                 return Some(reg);
                             }
                             let p = param_of[i - 1];
+                            if let Some(opened) = self
+                                .receiver_bound_param_from_optional(func_id, p, args[0].ty, a, reg)
+                            {
+                                return Some(opened);
+                            }
                             Some(match self.default_for_null_arg(func_id, p, a, reg) {
                                 Some(filled) => filled,
                                 None => self.maybe_materialize_for_call(a, reg, Some(func_id), p),
@@ -312,8 +318,15 @@ impl<'a> HirToMirContext<'a> {
                 // Gather type_args: first from HIR call-site type_args, then from receiver's
                 // generic instance type_args, then from the converted HIR type_args computed
                 // earlier in the Call handler.
+                let class_ordered = if *is_method && !args.is_empty() {
+                    self.class_first_method_type_args(*symbol, args[0].ty, hir_type_args)
+                } else {
+                    None
+                };
                 let mut call_type_args = if has_type_params {
-                    if !converted_hir_type_args.is_empty() {
+                    if let Some(ordered) = class_ordered {
+                        ordered
+                    } else if !converted_hir_type_args.is_empty() {
                         converted_hir_type_args.clone()
                     } else if *is_method && !args.is_empty() {
                         // Extract from receiver's GenericInstance / Class type_args

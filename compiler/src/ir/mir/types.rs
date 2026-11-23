@@ -294,6 +294,9 @@ impl<'a> HirToMirContext<'a> {
             if self.enum_is_boxed(*symbol_id) {
                 return IrType::enum_ptr();
             }
+            if enum_type == resolved {
+                return IrType::tag_enum(self.enum_runtime_id(*symbol_id));
+            }
         }
         self.convert_type(type_id)
     }
@@ -1886,6 +1889,13 @@ impl<'a> HirToMirContext<'a> {
         // Tag with the stable runtime id, not the context-local TypeId, so the
         // box agrees with RTTI registration and with `is`/reflection lookups.
         if is_enum {
+            if let Some(TypeKind::Enum { symbol_id, .. }) =
+                self.type_table.get(concrete_type_id).map(|t| &t.kind)
+                && !self.enum_is_boxed(*symbol_id)
+                && self.builder.get_register_type(value) == Some(IrType::I64)
+            {
+                return self.build_tag_enum_dynamic(*symbol_id, value);
+            }
             let type_id_u32 = self.runtime_type_id(concrete_type_id);
             let type_id_const = self.builder.build_const(IrValue::U32(type_id_u32))?;
             let dyn_ptr = IrType::Ptr(Box::new(IrType::Dynamic));

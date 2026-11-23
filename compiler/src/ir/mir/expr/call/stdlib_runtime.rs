@@ -109,7 +109,8 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// `m.get(k)` read as `Null<Int>` from a map of Ints: one probe that
-    /// answers the Int, or `NULL_INT` for an absent key.
+    /// answers the Int, or `NULL_INT` for an absent key. A map of a tag-only
+    /// enum probes the same way and answers the `Null<E>` view.
     fn load_map_null_int(
         &mut self,
         object: IrId,
@@ -126,7 +127,11 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::Optional { inner_type }) => *inner_type,
             _ => return None,
         };
-        if !self.optional_inner_is_null_int(inner) || self.convert_type(element) != IrType::I32 {
+        let tag_enum = self.is_tag_only_enum_type(inner) && self.is_tag_only_enum_type(element);
+        if !tag_enum
+            && (!self.optional_inner_is_null_int(inner)
+                || self.convert_type(element) != IrType::I32)
+        {
             return None;
         }
         let (_, key_type, _) = self.map_index_info(receiver)?;
@@ -138,7 +143,15 @@ impl<'a> HirToMirContext<'a> {
             types,
             IrType::NullInt,
         );
-        self.builder.build_call_direct(get, values, IrType::NullInt)
+        let value = self
+            .builder
+            .build_call_direct(get, values, IrType::NullInt)?;
+        if !tag_enum {
+            return Some(value);
+        }
+        let discriminant = self.builder.build_bitcast(value, IrType::I64)?;
+        let enum_symbol = self.resolve_enum_symbol(element)?;
+        self.build_tag_enum_dynamic(enum_symbol, discriminant)
     }
 
     pub(crate) fn append_native_map_layout(

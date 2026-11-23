@@ -631,6 +631,45 @@ impl<'a> HirToMirContext<'a> {
             return self.builder.build_cmp(cmp_op, sides[0], sides[1]);
         }
 
+        // Two tag-only enum values compare by discriminant. Either may be a
+        // `Null<E>` view, also once a null test narrows it to `E`; a null
+        // view reads as `NULL_INT`.
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne)
+            && !is_null_literal(lhs)
+            && !is_null_literal(rhs)
+        {
+            let tag_enum = |this: &Self, ty: TypeId| {
+                let ty = this.resolve_through_aliases(ty);
+                match this.type_table.get(ty).map(|t| &t.kind) {
+                    Some(TypeKind::Optional { inner_type }) => {
+                        this.is_tag_only_enum_type(*inner_type)
+                    }
+                    _ => this.is_tag_only_enum_type(ty),
+                }
+            };
+            if tag_enum(self, lhs.ty) && tag_enum(self, rhs.ty) {
+                let mut sides = [self.lower_expression(lhs)?, self.lower_expression(rhs)?];
+                // A view is a `*u8`; any other pointer register carries the
+                // discriminant's bits.
+                let view = IrType::Ptr(Box::new(IrType::U8));
+                for side in &mut sides {
+                    match self.builder.get_register_type(*side) {
+                        Some(ty) if ty == view => *side = self.tag_enum_from_view(*side)?,
+                        Some(IrType::Ptr(_)) => {
+                            *side = self.builder.build_bitcast(*side, IrType::I64)?
+                        }
+                        _ => {}
+                    }
+                }
+                let cmp_op = if matches!(op, HirBinaryOp::Eq) {
+                    CompareOp::Eq
+                } else {
+                    CompareOp::Ne
+                };
+                return self.builder.build_cmp(cmp_op, sides[0], sides[1]);
+            }
+        }
+
         // A tag-only enum value against null: null is `NULL_INT`, never a
         // discriminant.
         if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {

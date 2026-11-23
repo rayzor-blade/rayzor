@@ -1157,6 +1157,27 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// The declared type of a callee's formal, read off its typed symbol
+    /// when the callee belongs to another module.
+    pub(crate) fn declared_formal_type(
+        &self,
+        func_id: IrFunctionId,
+        index: usize,
+    ) -> Option<TypeId> {
+        if let Some(types) = self.function_param_hir_types.get(&func_id) {
+            return types.get(index).copied();
+        }
+        let symbol = self
+            .external_function_map
+            .iter()
+            .find_map(|(symbol, id)| (*id == func_id).then_some(*symbol))?;
+        let ty = self.symbol_table.get_symbol(symbol)?.type_id;
+        match self.type_table.get(ty).map(|t| &t.kind) {
+            Some(TypeKind::Function { params, .. }) => params.get(index).copied(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn maybe_materialize_for_call(
         &mut self,
         arg_expr: &HirExpr,
@@ -1198,6 +1219,12 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Path 2: direct class→anon or wider-anon→anon conversion at the call boundary.
+        // A `Null<T>` into a bare type parameter's slot opens to `T`.
+        if let Some(formal) = callee_func_id.and_then(|f| self.declared_formal_type(f, param_index))
+            && let Some(opened) = self.type_param_from_optional(arg_reg, arg_expr.ty, formal)
+        {
+            return opened;
+        }
         if let Some(func_id) = callee_func_id {
             let param_types = self
                 .function_param_hir_types
@@ -1253,6 +1280,22 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
+                    // A tag-only enum bound for a `Null<T>` or `Null<E>` formal is
+                    // its view, so the first constructor does not read as null.
+                    if self.is_tag_only_enum_type(resolved_arg)
+                        && self.builder.get_register_type(arg_reg) == Some(IrType::I64)
+                        && matches!(
+                            self.type_table.get(resolved_param).map(|t| &t.kind),
+                            Some(TypeKind::Optional { inner_type })
+                                if self.optional_inner_is_type_param(*inner_type)
+                                    || self.is_tag_only_enum_type(*inner_type)
+                        )
+                        && let Some(view) = self
+                            .resolve_enum_symbol(resolved_arg)
+                            .and_then(|symbol| self.build_tag_enum_dynamic(symbol, arg_reg))
+                    {
+                        return view;
+                    }
                     // Concrete → Dynamic at the call boundary must box, as Let/Assign and
                     // the Cast→Dynamic path do: a raw primitive would be read back as a
                     // bogus Dynamic pointer.

@@ -102,6 +102,101 @@ impl<'a> HirToMirContext<'a> {
             .unwrap_or_default()
     }
 
+    /// A generic class's method takes its class's variables first, then its
+    /// own. The typer lists only the variables the method's type names, in
+    /// symbol order, so the class's come from the receiver and the method's
+    /// own from that list. None when the shapes do not line up.
+    pub(crate) fn class_first_method_type_args(
+        &self,
+        method: SymbolId,
+        receiver: TypeId,
+        call_site: &[TypeId],
+    ) -> Option<Vec<IrType>> {
+        let mut receiver = self.resolve_through_aliases(receiver);
+        if let Some(TypeKind::Optional { inner_type }) =
+            self.type_table.get(receiver).map(|t| &t.kind)
+        {
+            receiver = self.resolve_through_aliases(*inner_type);
+        }
+        let (class, class_args) = match self.type_table.get(receiver).map(|t| &t.kind) {
+            Some(TypeKind::Class {
+                symbol_id,
+                type_args,
+            }) => (*symbol_id, type_args.clone()),
+            Some(TypeKind::GenericInstance {
+                base_type,
+                type_args,
+                ..
+            }) => match self.type_table.get(*base_type).map(|t| &t.kind) {
+                Some(TypeKind::Class { symbol_id, .. }) => (*symbol_id, type_args.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let class_params: Vec<SymbolId> = self
+            .symbol_table
+            .get_class_type_params(class)?
+            .iter()
+            .map(|ty| match self.type_table.get(*ty).map(|t| &t.kind) {
+                Some(TypeKind::TypeParameter { symbol_id, .. }) => Some(*symbol_id),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        if class_params.is_empty() || class_params.len() != class_args.len() {
+            return None;
+        }
+        // Only the class's own methods: an inherited or foreign callee orders
+        // its variables by another declaration.
+        let qualified = |symbol: SymbolId| {
+            self.symbol_table
+                .get_symbol(symbol)
+                .and_then(|s| s.qualified_name)
+                .and_then(|name| self.string_interner.get(name))
+        };
+        let owned = qualified(method)
+            .zip(qualified(class))
+            .and_then(|(method, class)| method.strip_prefix(class))
+            .is_some_and(|rest| rest.starts_with('.') && !rest[1..].contains('.'));
+        if !owned {
+            return None;
+        }
+        let fn_ty = self.symbol_table.get_symbol(method)?.type_id;
+        let Some(TypeKind::Function {
+            params,
+            return_type,
+            ..
+        }) = self.type_table.get(fn_ty).map(|t| &t.kind)
+        else {
+            return None;
+        };
+        let mut mentioned = BTreeMap::new();
+        for &ty in params.iter().chain(std::iter::once(return_type)) {
+            self.bind_type_parameters(ty, ty, &mut mentioned, 0);
+        }
+        if mentioned.len() != call_site.len() {
+            return None;
+        }
+        let own = mentioned
+            .keys()
+            .zip(call_site)
+            .filter(|(var, _)| !class_params.contains(var))
+            .map(|(_, &ty)| ty);
+        let ordered: Vec<IrType> = class_args
+            .iter()
+            .copied()
+            .chain(own)
+            .map(|ty| self.convert_type_arg(ty))
+            .collect();
+        let declared = self
+            .function_map
+            .get(&method)
+            .and_then(|id| self.builder.module.functions.get(id))
+            .map(|f| f.signature.type_params.len());
+        declared
+            .is_none_or(|n| n == ordered.len())
+            .then_some(ordered)
+    }
+
     /// A static callee from another module has no signature in this one, so its
     /// one type variable is bound from its declared type against the call's
     /// arguments. Several variables have no known order, and give nothing.
@@ -245,6 +340,29 @@ impl<'a> HirToMirContext<'a> {
                 .build_call_direct(box_fn, vec![bits, tag], ptr)?;
             self.boxed_value_regs.insert(boxed);
             return Some(boxed);
+        }
+        // A tag-only enum result: a `Null<T>` callee returns the view, a `T`
+        // callee the raw discriminant; each becomes the caller's form.
+        if self.callee_returns_type_param(symbol)
+            && let Some(enum_symbol) = self.resolve_enum_symbol(expr.ty)
+            && !self.enum_is_boxed(enum_symbol)
+        {
+            let optional = matches!(
+                self.type_table
+                    .get(self.resolve_through_aliases(expr.ty))
+                    .map(|ty| &ty.kind),
+                Some(TypeKind::Optional { .. })
+            );
+            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+            return match (self.callee_returns_nullable_type_param(symbol), optional) {
+                (true, true) => self.builder.build_bitcast(result, ptr_u8),
+                (true, false) => self.tag_enum_from_view(result),
+                (false, true) => {
+                    let bits = self.coerce_reg_to(result, &IrType::I64)?;
+                    self.build_tag_enum_dynamic(enum_symbol, bits)
+                }
+                (false, false) => self.coerce_reg_to(result, &IrType::I64),
+            };
         }
         if self.callee_returns_type_param(symbol) && self.resolve_enum_symbol(expr.ty).is_some() {
             let raw = self.unbox_generic_value(result, expr.ty)?;
