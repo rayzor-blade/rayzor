@@ -1,0 +1,5 @@
+[project]
+name = "null-float-generic-method-other-module"
+entry = "./NullFloatGenericMethodOtherModule.hx"
+[build]
+class-paths = ["."]

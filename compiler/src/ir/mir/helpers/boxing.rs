@@ -852,6 +852,33 @@ impl<'a> HirToMirContext<'a> {
     /// A `Null<scalar>` (or `Null<T>`) register opened for arithmetic: the
     /// scalar out of the box, as an I32/F64/Bool register. None when the
     /// type is not a nullable scalar or the register is not a pointer.
+    /// A box bound for a Float or Bool formal, opened to its value: by the
+    /// `Null<scalar>` type, or by a box register the typer called the scalar.
+    pub(crate) fn open_scalar_box_for(
+        &mut self,
+        reg: IrId,
+        ty: TypeId,
+        formal: &IrType,
+    ) -> Option<IrId> {
+        if !matches!(formal, IrType::F64 | IrType::F32 | IrType::Bool) {
+            return None;
+        }
+        if let Some(opened) = self.open_nullable_scalar(reg, ty) {
+            return self.coerce_reg_to(opened, formal);
+        }
+        if self.builder.get_register_type(reg) != Some(IrType::Ptr(Box::new(IrType::U8))) {
+            return None;
+        }
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let (unbox, out) = match formal {
+            IrType::Bool => ("haxe_unbox_bool_ptr", IrType::Bool),
+            _ => ("haxe_unbox_float_ptr", IrType::F64),
+        };
+        let f = self.get_or_register_extern_function(unbox, vec![ptr_u8], out.clone());
+        let value = self.builder.build_call_direct(f, vec![reg], out)?;
+        self.coerce_reg_to(value, formal)
+    }
+
     pub(crate) fn open_nullable_scalar(&mut self, reg: IrId, ty: TypeId) -> Option<IrId> {
         use crate::tast::TypeKind;
         // A `NullInt` truncates: null reads as 0.

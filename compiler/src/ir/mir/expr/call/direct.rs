@@ -190,6 +190,20 @@ impl<'a> HirToMirContext<'a> {
                     .map(|a| a.ty)
                     .collect();
                 let param_of = self.arg_param_indices(func_id, &user_arg_types);
+                // The callee's IR formals, `this` first.
+                let formals: Vec<IrType> = self
+                    .builder
+                    .module
+                    .functions
+                    .get(&func_id)
+                    .map(|f| {
+                        f.signature
+                            .parameters
+                            .iter()
+                            .map(|p| p.ty.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let arg_regs: Vec<_> = if *is_method {
                     args.iter()
                         .enumerate()
@@ -204,27 +218,26 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 return Some(opened);
                             }
-                            Some(match self.default_for_null_arg(func_id, p, a, reg) {
-                                Some(filled) => filled,
-                                None => self.maybe_materialize_for_call(a, reg, Some(func_id), p),
-                            })
+                            if let Some(filled) = self.default_for_null_arg(func_id, p, a, reg) {
+                                return Some(filled);
+                            }
+                            // A scalar formal takes the value a `Null<scalar>` box
+                            // holds, also once the typer has narrowed it. A callee
+                            // from another module is known by its typed formal.
+                            let formal = formals.get(p + 1).cloned().or_else(|| {
+                                self.declared_formal_type(func_id, p)
+                                    .map(|ty| self.convert_type(ty))
+                            });
+                            if let Some(formal) = formal
+                                && let Some(opened) = self.open_scalar_box_for(reg, a.ty, &formal)
+                            {
+                                return Some(opened);
+                            }
+                            Some(self.maybe_materialize_for_call(a, reg, Some(func_id), p))
                         })
                         .collect()
                 } else {
                     // A `Null<scalar>` argument for a scalar formal is opened.
-                    let formals: Vec<IrType> = self
-                        .builder
-                        .module
-                        .functions
-                        .get(&func_id)
-                        .map(|f| {
-                            f.signature
-                                .parameters
-                                .iter()
-                                .map(|p| p.ty.clone())
-                                .collect()
-                        })
-                        .unwrap_or_default();
                     args.iter()
                         .enumerate()
                         .filter_map(|(i, a)| {
