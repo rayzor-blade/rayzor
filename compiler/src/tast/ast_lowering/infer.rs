@@ -1927,6 +1927,21 @@ impl<'a> AstLowering<'a> {
             }) {
                 return *return_type;
             }
+            // A class returned where an interface is expected is that interface,
+            // so the result is wrapped for the caller's dispatch.
+            let interface_of = |ty: TypeId| match tt.get(unalias(ty)).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => tt.get(unalias(*inner_type)),
+                _ => tt.get(unalias(ty)),
+            };
+            if matches!(
+                interface_of(*return_type).map(|t| &t.kind),
+                Some(TypeKind::Interface { .. })
+            ) && matches!(
+                interface_of(inferred).map(|t| &t.kind),
+                Some(TypeKind::Class { .. })
+            ) {
+                return *return_type;
+            }
             let Some(TypeKind::Optional { inner_type }) =
                 tt.get(unalias(*return_type)).map(|t| &t.kind)
             else {

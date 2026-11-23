@@ -477,7 +477,9 @@ impl<'a> HirToMirContext<'a> {
                     },
                     _ => body.ty,
                 };
-                self.maybe_abstract_to_convert(reg, value_ty, ret_ty)
+                let (wrapped, did_wrap) = self.maybe_wrap_for_interface(reg, value_ty, ret_ty);
+                (did_wrap.then_some(wrapped))
+                    .or_else(|| self.maybe_abstract_to_convert(reg, value_ty, ret_ty))
                     .or_else(|| {
                         let converted = self.convert_dynamic_if_result(reg, value_ty, ret_ty)?;
                         if converted != reg {
