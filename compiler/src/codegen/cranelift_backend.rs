@@ -6477,7 +6477,9 @@ impl CraneliftBackend {
     }
 
     /// Register class RTTI by walking MIR module type definitions directly.
-    pub fn register_class_rtti_from_modules(modules: &[std::sync::Arc<crate::ir::IrModule>]) {
+    pub fn register_class_rtti_from_modules<M: std::ops::Deref<Target = crate::ir::IrModule>>(
+        modules: &[M],
+    ) {
         for module in modules {
             Self::register_runtime_metadata_from_module(module);
         }
@@ -6642,7 +6644,9 @@ impl CraneliftBackend {
 
     /// Register enum RTTI by walking MIR module type definitions directly.
     /// This avoids generating __init__ code that calls runtime functions via FFI.
-    pub fn register_enum_rtti_from_modules(modules: &[std::sync::Arc<crate::ir::IrModule>]) {
+    pub fn register_enum_rtti_from_modules<M: std::ops::Deref<Target = crate::ir::IrModule>>(
+        modules: &[M],
+    ) {
         use crate::ir::modules::IrTypeDefinition;
         use rayzor_runtime::type_system::{ParamType, register_enum_from_mir};
 

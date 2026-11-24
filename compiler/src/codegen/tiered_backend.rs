@@ -1724,21 +1724,18 @@ impl TieredBackend {
 
     fn ensure_loaded_modules_initialized(&mut self) -> Result<(), String> {
         let start_idx = *self.initialized_module_count.lock().unwrap();
-        let modules_to_init: Vec<IrModule> = {
+        // The stored modules are read in place: a module is the program's
+        // whole MIR, so a copy of it doubles the startup peak.
+        let end_idx = {
             let modules = self.modules.read().unwrap();
             if start_idx >= modules.len() {
                 return Ok(());
             }
-            modules[start_idx..].to_vec()
+            let loaded: Vec<&IrModule> = modules[start_idx..].iter().collect();
+            CraneliftBackend::register_enum_rtti_from_modules(&loaded);
+            CraneliftBackend::register_class_rtti_from_modules(&loaded);
+            modules.len()
         };
-
-        if modules_to_init.is_empty() {
-            return Ok(());
-        }
-
-        let module_refs: Vec<_> = modules_to_init.iter().cloned().map(Arc::new).collect();
-        CraneliftBackend::register_enum_rtti_from_modules(&module_refs);
-        CraneliftBackend::register_class_rtti_from_modules(&module_refs);
 
         // In JIT mode (`!start_interpreted`) everything is compiled before
         // the startup hooks run, so `__vtable_init__` registers compiled
@@ -1754,7 +1751,8 @@ impl TieredBackend {
                 // module once it has installed native pointers. Only run the
                 // newly loaded slice here when native code already existed;
                 // doing both executed each static initializer twice.
-                self.run_startup_hooks_native(&modules_to_init, true)?;
+                let modules = self.modules.read().unwrap();
+                self.run_startup_hooks_native(&modules[start_idx..end_idx], true)?;
             }
         } else {
             // The stored modules, not the copies: function values made while
@@ -1763,7 +1761,7 @@ impl TieredBackend {
             self.run_startup_hooks_interpreter(&modules[start_idx..])?;
         }
 
-        *self.initialized_module_count.lock().unwrap() = start_idx + modules_to_init.len();
+        *self.initialized_module_count.lock().unwrap() = end_idx;
         Ok(())
     }
 
@@ -4865,10 +4863,10 @@ impl BackgroundTierUp {
         }
     }
 
-    /// Copy the modules, add `waiting`'s resume points, and optimize the
-    /// functions `roots` reach: each root and its callees, skipping those
-    /// `bound` serves. Optimizing can call what was not called before, so the
-    /// unit is taken again after.
+    /// Copy what `roots` and `waiting` reach, add `waiting`'s resume points,
+    /// and optimize the functions `roots` reach: each root and its callees,
+    /// skipping those `bound` serves. Every other function is copied as a
+    /// placeholder, so a batch costs what it compiles, not the program.
     fn prepare(
         &self,
         live: &[IrModule],
@@ -4876,7 +4874,145 @@ impl BackgroundTierUp {
         waiting: Vec<(usize, IrFunction, Vec<(crate::ir::IrBlockId, bool)>)>,
         bound: &BTreeMap<IrFunctionId, usize>,
     ) -> Unit {
-        let mut work = live.to_vec();
+        let mut reached: Vec<IrFunctionId> = roots.to_vec();
+        reached.extend(waiting.iter().map(|(_, function, _)| function.id));
+        TieredBackend::add_unserved_callees(live, bound, &mut reached);
+        let reached: BTreeSet<IrFunctionId> = reached.into_iter().collect();
+        let (work, placeholders) = Self::copy_reached(live, &reached);
+        let unit = self.prepare_from(work, live, roots, waiting.clone(), bound);
+        // Optimizing compiles only what was reached, so it reaches nothing
+        // new; if it did, that body was not copied and the whole program is.
+        if unit.targets.iter().all(|id| !placeholders.contains(id)) {
+            return unit;
+        }
+        emit_tier_event("prepare_full_copy", roots.first().copied(), None, "");
+        self.prepare_from(live.to_vec(), live, roots, waiting, bound)
+    }
+
+    /// `live` with the functions in `reached`, and any with type parameters,
+    /// copied whole; every other function becomes a placeholder: its
+    /// signature over one unreachable block, still a body to the backends,
+    /// which treat an empty CFG as an extern. The placeholders' ids come back.
+    fn copy_reached(
+        live: &[IrModule],
+        reached: &BTreeSet<IrFunctionId>,
+    ) -> (Vec<IrModule>, BTreeSet<IrFunctionId>) {
+        let mut placeholders = BTreeSet::new();
+        let work = live
+            .iter()
+            .map(|module| {
+                let IrModule {
+                    name,
+                    source_file,
+                    functions,
+                    globals,
+                    types,
+                    string_pool,
+                    extern_functions,
+                    metadata,
+                    next_function_id,
+                    next_global_id,
+                    next_typedef_id,
+                    symbol_to_register,
+                    register_to_symbol,
+                    external_function_names,
+                    import_file_blocks,
+                } = module;
+                let functions = functions
+                    .iter()
+                    .map(|(id, function)| {
+                        let whole = reached.contains(id)
+                            || function.cfg.blocks.is_empty()
+                            || !function.signature.type_params.is_empty();
+                        if whole {
+                            return (*id, function.clone());
+                        }
+                        placeholders.insert(*id);
+                        (*id, Self::placeholder_of(function))
+                    })
+                    .collect();
+                IrModule {
+                    name: name.clone(),
+                    source_file: source_file.clone(),
+                    functions,
+                    globals: globals.clone(),
+                    types: types.clone(),
+                    string_pool: string_pool.clone(),
+                    extern_functions: extern_functions.clone(),
+                    metadata: metadata.clone(),
+                    next_function_id: *next_function_id,
+                    next_global_id: *next_global_id,
+                    next_typedef_id: *next_typedef_id,
+                    symbol_to_register: symbol_to_register.clone(),
+                    register_to_symbol: register_to_symbol.clone(),
+                    external_function_names: external_function_names.clone(),
+                    import_file_blocks: import_file_blocks.clone(),
+                }
+            })
+            .collect();
+        (work, placeholders)
+    }
+
+    /// `function`'s declaration over one unreachable block. It keeps the
+    /// wide-vector register types, which decide whether Cranelift declares it.
+    fn placeholder_of(function: &IrFunction) -> IrFunction {
+        let IrFunction {
+            id,
+            symbol_id,
+            name,
+            qualified_name,
+            signature,
+            cfg: _,
+            locals: _,
+            register_types,
+            attributes,
+            kind,
+            source_location,
+            next_reg_id,
+            type_param_tag_fixups: _,
+            type_param_metadata_fixups: _,
+            erased_params,
+            wasm_export,
+            js_import,
+        } = function;
+        let wide = |ty: &crate::ir::IrType| {
+            matches!(ty, crate::ir::IrType::Vector { element, count }
+                if element.size() * count > 16)
+        };
+        IrFunction {
+            id: *id,
+            symbol_id: *symbol_id,
+            name: name.clone(),
+            qualified_name: qualified_name.clone(),
+            signature: signature.clone(),
+            cfg: crate::ir::IrControlFlowGraph::new(),
+            locals: BTreeMap::new(),
+            register_types: register_types
+                .iter()
+                .filter(|(_, ty)| wide(ty))
+                .map(|(reg, ty)| (*reg, ty.clone()))
+                .collect(),
+            attributes: attributes.clone(),
+            kind: kind.clone(),
+            source_location: source_location.clone(),
+            next_reg_id: *next_reg_id,
+            type_param_tag_fixups: Vec::new(),
+            type_param_metadata_fixups: Vec::new(),
+            erased_params: erased_params.clone(),
+            wasm_export: *wasm_export,
+            js_import: js_import.clone(),
+        }
+    }
+
+    /// `prepare` over `work`, a copy of `live`.
+    fn prepare_from(
+        &self,
+        mut work: Vec<IrModule>,
+        live: &[IrModule],
+        roots: &[IrFunctionId],
+        waiting: Vec<(usize, IrFunction, Vec<(crate::ir::IrBlockId, bool)>)>,
+        bound: &BTreeMap<IrFunctionId, usize>,
+    ) -> Unit {
         let seed = crate::ir::abi::indirect_targets(live);
         if self.stack_traces {
             TieredBackend::instrument_modules_for_stack_traces(&mut work);
