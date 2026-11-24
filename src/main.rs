@@ -2217,6 +2217,10 @@ fn run_file(
         for (name, site, count) in compiler::ir::osr::transfers_taken() {
             eprintln!("[osr] transferred {name} site=0x{site:x} x{count}");
         }
+        eprintln!(
+            "[osr] interpreted loops moved to compiled code x{}",
+            backend.interpreter_transfers()
+        );
     }
 
     if stats {

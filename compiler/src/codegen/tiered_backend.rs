@@ -2639,6 +2639,11 @@ impl TieredBackend {
     }
 
     /// What this backend has compiled to native code on the calling thread.
+    /// How many interpreted loops moved to compiled code at a resume point.
+    pub fn interpreter_transfers(&self) -> u64 {
+        self.interpreter.lock().unwrap().transfers()
+    }
+
     pub fn compile_activity(&self) -> CompileActivity {
         self.activity
     }
@@ -5097,6 +5102,7 @@ impl BackgroundTierUp {
             .unwrap()
             .contains_key(&func_id);
         let known = self.function_pointers.read().unwrap().clone();
+        let mut name = String::new();
         let unit = {
             let live = self.modules.read().unwrap();
             let index = live
@@ -5108,6 +5114,10 @@ impl BackgroundTierUp {
                 .get(&func_id)
                 .filter(|f| !f.cfg.blocks.is_empty())
                 .ok_or("no body to compile")?;
+            name = function
+                .qualified_name
+                .clone()
+                .unwrap_or_else(|| function.name.clone());
             let header = at.and_then(|block| {
                 let domtree = crate::ir::loop_analysis::DominatorTree::compute(function);
                 let loops = crate::ir::loop_analysis::LoopNestInfo::analyze(function, &domtree);
@@ -5192,14 +5202,17 @@ impl BackgroundTierUp {
             .map(|(id, ptr)| (*id, *ptr))
             .collect();
         let installed = self.install(&functions, OptimizationTier::Baseline, false);
+        let mut resume_points = 0;
         for (_, parent, variant, layout) in unit.resume_points {
             if let Some(&ptr) = compiled.get(&variant) {
                 self.program
                     .install_resume_point(module, parent, ptr, layout);
+                resume_points += 1;
             }
         }
         Ok(Some(format!(
-            "functions={installed} mir_ms={mir_ms:.3} cranelift_ms={:.3}",
+            "name={} functions={installed} resume_points={resume_points} mir_ms={mir_ms:.3} cranelift_ms={:.3}",
+            name.replace(char::is_whitespace, "_"),
             ms_since(cranelift_started)
         )))
     }
