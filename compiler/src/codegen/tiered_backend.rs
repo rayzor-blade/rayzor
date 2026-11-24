@@ -2639,6 +2639,21 @@ impl TieredBackend {
     }
 
     /// What this backend has compiled to native code on the calling thread.
+    /// Functions the interpreter decoded, functions with a body, and the
+    /// bytes its decoded cache holds.
+    pub fn interpreter_decode_stats(&self) -> (usize, usize, usize) {
+        let (decoded, bytes) = self.interpreter.lock().unwrap().decode_stats();
+        let bodies = self
+            .modules
+            .read()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m.functions.values())
+            .filter(|f| !f.cfg.blocks.is_empty())
+            .count();
+        (decoded, bodies, bytes)
+    }
+
     /// How many interpreted loops moved to compiled code at a resume point.
     pub fn interpreter_transfers(&self) -> u64 {
         self.interpreter.lock().unwrap().transfers()

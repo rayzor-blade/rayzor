@@ -2213,6 +2213,15 @@ fn run_file(
     // A published resume point proves only that one was compiled. Report the
     // transfers that actually happened, so a run where none did is not mistaken
     // for one where transferring was free.
+    // RAYZOR_INTERP_STATS=1 prints how much of the program the interpreter decoded.
+    if std::env::var_os("RAYZOR_INTERP_STATS").is_some() {
+        let (decoded, bodies, bytes) = backend.interpreter_decode_stats();
+        eprintln!(
+            "[interp] decoded {decoded} of {bodies} functions; cache holds {:.1} MB",
+            bytes as f64 / 1e6
+        );
+    }
+
     if compiler::ir::osr::osr_trace_enabled() {
         for (name, site, count) in compiler::ir::osr::transfers_taken() {
             eprintln!("[osr] transferred {name} site=0x{site:x} x{count}");

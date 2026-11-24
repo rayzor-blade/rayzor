@@ -159,6 +159,13 @@ pub(crate) struct Program {
     /// Functions decoded once and not kept: one that runs only once (module
     /// init, setup) would otherwise hold its decoded body for the whole run.
     decoded_once: RwLock<std::collections::HashSet<(usize, IrFunctionId)>>,
+    /// What `decoded` holds, against `decoded_budget`.
+    decoded_bytes: std::sync::atomic::AtomicUsize,
+    /// Past it the largest decoded functions are dropped and decoded again
+    /// when next called. RAYZOR_INTERP_CACHE_MB sets it; any value is safe.
+    decoded_budget: usize,
+    /// Each function's heat, kept across its decodings.
+    heat: Mutex<HashMap<(usize, IrFunctionId), Arc<std::sync::atomic::AtomicU64>>>,
     indirect: RwLock<HashMap<usize, Arc<BTreeSet<IrFunctionId>>>>,
     natives: RwLock<HashMap<IrFunctionId, usize>>,
     /// Set once compiled code is installed: hot loops then transfer to it.
@@ -183,6 +190,13 @@ impl Program {
             symbols: RwLock::new(HashMap::new()),
             decoded: RwLock::new(HashMap::new()),
             decoded_once: RwLock::new(std::collections::HashSet::new()),
+            decoded_bytes: std::sync::atomic::AtomicUsize::new(0),
+            decoded_budget: std::env::var("RAYZOR_INTERP_CACHE_MB")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(32)
+                << 20,
+            heat: Mutex::new(HashMap::new()),
             indirect: RwLock::new(HashMap::new()),
             natives: RwLock::new(HashMap::new()),
             compiled: AtomicBool::new(false),
@@ -192,6 +206,36 @@ impl Program {
             transfers: std::sync::atomic::AtomicU64::new(0),
             literals: Mutex::new(HashMap::new()),
             cache: AtomicBool::new(true),
+        }
+    }
+
+    pub(crate) fn heat_of(
+        &self,
+        module: usize,
+        func: IrFunctionId,
+    ) -> Arc<std::sync::atomic::AtomicU64> {
+        self.heat
+            .lock()
+            .unwrap()
+            .entry((module, func))
+            .or_default()
+            .clone()
+    }
+
+    /// Keep `f` decoded, then drop the largest entries while over budget.
+    fn cache_decoded(&self, key: (usize, IrFunctionId), f: &Arc<Function>) {
+        let mut decoded = self.decoded.write().unwrap();
+        if let Some(old) = decoded.insert(key, f.clone()) {
+            self.decoded_bytes.fetch_sub(old.bytes, Ordering::Relaxed);
+        }
+        let mut total = self.decoded_bytes.fetch_add(f.bytes, Ordering::Relaxed) + f.bytes;
+        while total > self.decoded_budget {
+            let Some((&largest, _)) = decoded.iter().max_by_key(|(_, f)| f.bytes) else {
+                break;
+            };
+            if let Some(gone) = decoded.remove(&largest) {
+                total = self.decoded_bytes.fetch_sub(gone.bytes, Ordering::Relaxed) - gone.bytes;
+            }
         }
     }
 
@@ -274,7 +318,13 @@ impl Program {
         self.natives.write().unwrap().insert(func, code);
         // Calls now go to the compiled code; frames already running keep the
         // decoded body they hold.
-        self.decoded.write().unwrap().retain(|(_, f), _| *f != func);
+        self.decoded.write().unwrap().retain(|(_, f), decoded| {
+            if *f == func {
+                self.decoded_bytes
+                    .fetch_sub(decoded.bytes, Ordering::Relaxed);
+            }
+            *f != func
+        });
         self.compiled.store(true, Ordering::Release);
         let stubs = trampoline::forward(func, code);
         // The runtime keys closures by code address; a stub handed out before
@@ -393,7 +443,7 @@ impl Machine {
             && self.program.native(id).is_none()
             && !self.program.decoded_once.write().unwrap().insert(key)
         {
-            self.program.decoded.write().unwrap().insert(key, f.clone());
+            self.program.cache_decoded(key, &f);
         }
         Ok(f)
     }
@@ -559,6 +609,10 @@ impl MirInterpreter {
     /// Forget decoded functions, as when the modules behind them change.
     pub fn clear_decoded_cache(&mut self) {
         self.machine.program.decoded.write().unwrap().clear();
+        self.machine
+            .program
+            .decoded_bytes
+            .store(0, Ordering::Relaxed);
         self.machine.program.indirect.write().unwrap().clear();
     }
 
@@ -629,6 +683,15 @@ impl MirInterpreter {
     }
 
     /// How many interpreted loops have carried on in compiled code.
+    /// Distinct functions decoded so far, and what the cache holds in bytes.
+    pub fn decode_stats(&self) -> (usize, usize) {
+        let program = &self.machine.program;
+        (
+            program.decoded_once.read().unwrap().len(),
+            program.decoded_bytes.load(Ordering::Relaxed),
+        )
+    }
+
     pub fn transfers(&self) -> u64 {
         self.machine.program.transfers.load(Ordering::Relaxed)
     }

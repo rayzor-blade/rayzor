@@ -597,8 +597,11 @@ pub(crate) struct Function {
     /// Compiled resume points by loop header, as of the last ones published.
     pub osr: super::exec::OsrCache,
     /// Blocks entered while interpreted, counted when compiling it is asked
-    /// for in the background.
-    pub heat: std::sync::atomic::AtomicU64,
+    /// for in the background. Shared by every decoding of the function, so a
+    /// copy decoded again after eviction carries on counting.
+    pub heat: Arc<std::sync::atomic::AtomicU64>,
+    /// What the decoded form roughly occupies, for the cache's budget.
+    pub bytes: usize,
     pub abi: Abi,
     pub return_type: IrType,
     /// MIR parameters in order, after the hidden ones.
@@ -957,7 +960,14 @@ pub(crate) fn decode(
         blocks.push(Block { ops, term });
     }
 
-    let reg_mts = (0..d.next_reg).map(|r| d.mt_of(r)).collect();
+    let reg_mts: Vec<Mt> = (0..d.next_reg).map(|r| d.mt_of(r)).collect();
+    let bytes = std::mem::size_of::<Function>()
+        + blocks
+            .iter()
+            .map(|b| std::mem::size_of::<Block>() + b.ops.capacity() * std::mem::size_of::<Op>())
+            .sum::<usize>()
+        + order.len() * std::mem::size_of::<IrBlockId>()
+        + reg_mts.len() * std::mem::size_of::<Mt>();
     Ok(Function {
         id: func_id,
         name: Arc::from(function.name.as_str()),
@@ -965,7 +975,8 @@ pub(crate) fn decode(
         block_ids: order,
         reg_mts,
         osr: super::exec::OsrCache::default(),
-        heat: std::sync::atomic::AtomicU64::new(0),
+        heat: program.heat_of(d.module_addr, func_id),
+        bytes,
         abi,
         return_type: function.signature.return_type.clone(),
         params,
