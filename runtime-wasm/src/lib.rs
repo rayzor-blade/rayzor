@@ -648,26 +648,40 @@ pub extern "C" fn haxe_string_free(s: i32) {
     }
 }
 
-/// Free a Bytes' data buffer. The HaxeBytes header is `{data_ptr, len, cap}`;
-/// the data was `rayzor_malloc`-ed (align 8), so reconstruct that layout from
-/// `cap` and dealloc it. The 40-byte header itself is left to leak (negligible
-/// vs. the buffer). SAFETY: ONLY call on an OWNER Bytes, never a `subWithBase`
-/// view — views share the owner's `data_ptr`, so freeing a view would leave
-/// the owner (and siblings) dangling. The GGUF loader frees the whole-file
-/// buffer once, after every tensor/QTensor has copied its slice out of it.
+/// Drop one reference to a Bytes. A view's header goes at once and its
+/// reference on the owner with it; an owner's data and header go with the last
+/// reference, so a view outliving its owner's release stays readable. Header
+/// layout (`bytes_io.rs`): data u32 @0, len @4, cap @8, kind u8 @12,
+/// owner u32 @20, refcount i64 @24; data and header are `rt_alloc`-ed.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_free(b: i32) {
     if b == 0 {
         return;
     }
     unsafe {
-        let base = b as *const u32;
-        let data_ptr = *base;
-        let cap = *base.add(2);
-        if data_ptr != 0 && cap > 0 {
-            let layout = Layout::from_size_align_unchecked(cap as usize, 8);
-            dealloc(data_ptr as *mut u8, layout);
+        let h = b as *mut u8;
+        if *h.add(12) == 2 {
+            let owner = *(h.add(20) as *const u32) as i32;
+            dealloc(h, Layout::from_size_align_unchecked(40, 8));
+            if owner != 0 {
+                haxe_bytes_free(owner);
+            }
+            return;
         }
+        let refcount = h.add(24) as *mut i64;
+        *refcount -= 1;
+        if *refcount > 0 {
+            return;
+        }
+        let data_ptr = *(h as *const u32);
+        let cap = *(h.add(8) as *const u32);
+        if data_ptr != 0 && cap > 0 {
+            dealloc(
+                data_ptr as *mut u8,
+                Layout::from_size_align_unchecked(cap as usize, 8),
+            );
+        }
+        dealloc(h, Layout::from_size_align_unchecked(40, 8));
     }
 }
 

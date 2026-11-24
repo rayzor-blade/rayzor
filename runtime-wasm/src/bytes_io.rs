@@ -184,7 +184,9 @@ pub extern "C" fn haxe_bytes_set(b: i32, pos: i32, value: i32) {
 }
 
 /// `bytes.sub(pos, len)`: a view sharing the owner's data, as the native
-/// runtime and the wasm host do. Never pass a view to `haxe_bytes_free`.
+/// runtime and the wasm host do. The view counts a reference on the owner
+/// (a view of a view on the same owner), so `haxe_bytes_free` on either keeps
+/// the data until the last reference goes.
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_bytes_sub(b: i32, pos: i32, len: i32) -> i32 {
     if b == 0 {
@@ -199,13 +201,23 @@ pub extern "C" fn haxe_bytes_sub(b: i32, pos: i32, len: i32) -> i32 {
         return 0;
     }
     let view = unsafe { data.add(r.start) } as u32;
+    let owner = unsafe {
+        let h = b as *mut u8;
+        let parent = *(h.add(20) as *const u32);
+        if *h.add(12) == BYTES_KIND_VIEW && parent != 0 {
+            parent
+        } else {
+            b as u32
+        }
+    };
+    unsafe { *((owner as *mut u8).add(24) as *mut i64) += 1 };
     write_bytes_header(
         header,
         view,
         r.len() as u32,
         r.len() as u32,
         BYTES_KIND_VIEW,
-        b as u32,
+        owner,
     );
     header
 }

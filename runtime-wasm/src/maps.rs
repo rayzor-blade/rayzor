@@ -129,6 +129,14 @@ impl<K: Clone> Map<K> {
         })) as i32
     }
 
+    /// Release a map made by `alloc`. It owns the keys it holds and none of
+    /// its values.
+    fn free(ptr: i32) {
+        if ptr != 0 {
+            drop(unsafe { Box::from_raw(ptr as *mut Map<K>) });
+        }
+    }
+
     unsafe fn at<'a>(ptr: i32) -> Option<&'a mut Map<K>> {
         if ptr == 0 {
             None
@@ -245,6 +253,11 @@ fn str_insert(map: &mut StrMap, key: &[u8], value: i32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_stringmap_new() -> i32 {
     StrMap::alloc()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_stringmap_free(map: i32) {
+    StrMap::free(map);
 }
 
 #[unsafe(no_mangle)]
@@ -368,6 +381,11 @@ pub extern "C" fn haxe_intmap_new() -> i32 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn haxe_intmap_free(map: i32) {
+    IntMap::free(map);
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn haxe_intmap_set(map: i32, key: i32, value: i32) {
     if let Some(m) = unsafe { IntMap::at(map) } {
         m.table.insert(key, value);
@@ -430,6 +448,11 @@ pub extern "C" fn haxe_intmap_to_string(map: i32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_objectmap_new() -> i32 {
     ObjMap::alloc()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_objectmap_free(map: i32) {
+    ObjMap::free(map);
 }
 
 #[unsafe(no_mangle)]
