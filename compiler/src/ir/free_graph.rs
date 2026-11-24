@@ -23,7 +23,8 @@ pub enum Release {
     StringFree,
     ArrayFreeThenHeader,
     AnonDrop,
-    BytesFree,
+    /// A runtime object's own release entry (Bytes, a map).
+    RuntimeFree,
     PlainFree,
 }
 
@@ -48,7 +49,7 @@ pub struct ReleaseRecord {
 #[derive(Serialize, Clone, Debug)]
 pub struct AllocRecord {
     pub id: u32,
-    /// `string`, `array`, `anon`, `bytes` or `plain` — what the pass believes it is.
+    /// `string`, `array`, `anon`, `boxed` or `plain` — what the pass believes it is.
     pub kind: String,
     pub def_block: Option<u32>,
     /// The instruction that produced it, rendered for reading.

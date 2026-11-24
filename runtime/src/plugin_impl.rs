@@ -1011,6 +1011,7 @@ register_symbol!("haxe_bytes_free", crate::haxe_sys::haxe_bytes_free);
 // StringMap<T> (haxe.ds.StringMap)
 // ============================================================================
 register_symbol!("haxe_stringmap_new", crate::haxe_sys::haxe_stringmap_new);
+register_symbol!("haxe_stringmap_free", crate::haxe_sys::haxe_stringmap_free);
 register_symbol!("haxe_stringmap_set", crate::haxe_sys::haxe_stringmap_set);
 register_symbol!(
     "haxe_stringmap_get_typed",
@@ -1076,6 +1077,7 @@ register_symbol!(
 // IntMap<T> (haxe.ds.IntMap)
 // ============================================================================
 register_symbol!("haxe_intmap_new", crate::haxe_sys::haxe_intmap_new);
+register_symbol!("haxe_intmap_free", crate::haxe_sys::haxe_intmap_free);
 register_symbol!("haxe_intmap_set", crate::haxe_sys::haxe_intmap_set);
 register_symbol!("haxe_intmap_get", crate::haxe_sys::haxe_intmap_get);
 register_symbol!("haxe_intmap_exists", crate::haxe_sys::haxe_intmap_exists);
@@ -1113,6 +1115,7 @@ register_symbol!(
 // ObjectMap<K,V> (haxe.ds.ObjectMap) — pointer identity keys
 // ============================================================================
 register_symbol!("haxe_objectmap_new", crate::haxe_sys::haxe_objectmap_new);
+register_symbol!("haxe_objectmap_free", crate::haxe_sys::haxe_objectmap_free);
 register_symbol!("haxe_objectmap_set", crate::haxe_sys::haxe_objectmap_set);
 register_symbol!("haxe_objectmap_get", crate::haxe_sys::haxe_objectmap_get);
 register_symbol!(

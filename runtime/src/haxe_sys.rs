@@ -4551,6 +4551,14 @@ pub extern "C" fn haxe_stringmap_new() -> *mut HaxeStringMap {
     }))
 }
 
+/// Release a StringMap and the keys it copied. It owns none of its values.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_stringmap_free(map_ptr: *mut HaxeStringMap) {
+    if !map_ptr.is_null() {
+        drop(unsafe { Box::from_raw(map_ptr) });
+    }
+}
+
 /// Set a value in the StringMap
 /// Value is passed as raw u64 bits (compiler handles type conversion)
 #[unsafe(no_mangle)]
@@ -4928,6 +4936,14 @@ pub extern "C" fn haxe_intmap_new() -> *mut HaxeIntMap {
     }))
 }
 
+/// Release an IntMap. It owns none of its values.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_intmap_free(map_ptr: *mut HaxeIntMap) {
+    if !map_ptr.is_null() {
+        drop(unsafe { Box::from_raw(map_ptr) });
+    }
+}
+
 /// Set a value in the IntMap
 /// Value is passed as raw u64 bits
 #[unsafe(no_mangle)]
@@ -5266,6 +5282,14 @@ pub extern "C" fn haxe_objectmap_new() -> *mut HaxeObjectMap {
         map: HashMap::default(),
         value_layout: MapValueLayout::default(),
     }))
+}
+
+/// Release an ObjectMap. It owns neither its keys nor its values.
+#[unsafe(no_mangle)]
+pub extern "C" fn haxe_objectmap_free(map_ptr: *mut HaxeObjectMap) {
+    if !map_ptr.is_null() {
+        drop(unsafe { Box::from_raw(map_ptr) });
+    }
 }
 
 /// Set a value in the ObjectMap
