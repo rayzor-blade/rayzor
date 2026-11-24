@@ -162,7 +162,10 @@ pub(crate) struct Program {
     /// What `decoded` holds, against `decoded_budget`.
     decoded_bytes: std::sync::atomic::AtomicUsize,
     /// Past it the largest decoded functions are dropped and decoded again
-    /// when next called. RAYZOR_INTERP_CACHE_MB sets it; any value is safe.
+    /// when next called. It bounds a program whose working set is unusually
+    /// large; below the working set every call decodes again, so it must stay
+    /// well above a normal one. RAYZOR_INTERP_CACHE_MB sets it; any value is
+    /// safe.
     decoded_budget: usize,
     /// Each function's heat, kept across its decodings.
     heat: Mutex<HashMap<(usize, IrFunctionId), Arc<std::sync::atomic::AtomicU64>>>,
@@ -194,7 +197,7 @@ impl Program {
             decoded_budget: std::env::var("RAYZOR_INTERP_CACHE_MB")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(32)
+                .unwrap_or(256)
                 << 20,
             heat: Mutex::new(HashMap::new()),
             indirect: RwLock::new(HashMap::new()),
