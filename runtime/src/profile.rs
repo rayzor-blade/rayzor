@@ -64,6 +64,9 @@ pub struct SiteStat {
     sampled_bytes: u64,
     /// Sampled bytes not yet freed.
     live_bytes: u64,
+    /// The largest single sampled allocation: a site whose bytes are one
+    /// large sample is overstated by up to the rate.
+    max_sample_bytes: u64,
     pcs: [usize; 6],
 }
 
@@ -120,11 +123,13 @@ fn record_sample(ptr: usize, size: u64) {
             sampled_count: 0,
             sampled_bytes: 0,
             live_bytes: 0,
+            max_sample_bytes: 0,
             pcs: top,
         });
         e.sampled_count += 1;
         e.sampled_bytes += size;
         e.live_bytes += size;
+        e.max_sample_bytes = e.max_sample_bytes.max(size);
     }
     IN_GRAPH.with(|g| g.set(false));
 }
@@ -190,11 +195,19 @@ pub extern "C" fn rayzor_dump_alloc_graph() {
     // operations during dump re-enter `record_sample` and deadlock on
     // the same Mutex.
     IN_GRAPH.with(|g| g.set(true));
-    let snapshot: Vec<(u64, u64, u64, [usize; 6])> = match GRAPH_SITES.lock() {
+    let snapshot: Vec<(u64, u64, u64, u64, [usize; 6])> = match GRAPH_SITES.lock() {
         Ok(g) => match g.as_ref() {
             Some(m) => m
                 .values()
-                .map(|v| (v.sampled_count, v.sampled_bytes, v.live_bytes, v.pcs))
+                .map(|v| {
+                    (
+                        v.sampled_count,
+                        v.sampled_bytes,
+                        v.live_bytes,
+                        v.max_sample_bytes,
+                        v.pcs,
+                    )
+                })
                 .collect(),
             None => {
                 IN_GRAPH.with(|g| g.set(false));
@@ -213,7 +226,7 @@ pub extern "C" fn rayzor_dump_alloc_graph() {
     // In CPU-profile-only mode rate is 0; surface the raw sample count.
     let scale = if rate == 0 { 1 } else { rate };
     let mut out = String::from(
-        "rank,sampled_allocs,est_total_allocs,est_total_bytes,est_live_bytes,pc1,pc2,pc3,pc4,pc5,pc6,sym1,sym2,sym3,sym4,sym5,sym6\n",
+        "rank,sampled_allocs,est_total_allocs,est_total_bytes,est_live_bytes,max_sample_bytes,pc1,pc2,pc3,pc4,pc5,pc6,sym1,sym2,sym3,sym4,sym5,sym6\n",
     );
     // Resolved here, in the process, where the load addresses are known.
     let mut names: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
@@ -234,14 +247,15 @@ pub extern "C" fn rayzor_dump_alloc_graph() {
             .clone()
     };
     let n = rows.len().min(120);
-    for (rank, (sc, bytes, live, pcs)) in rows.iter().enumerate().take(120) {
+    for (rank, (sc, bytes, live, max, pcs)) in rows.iter().enumerate().take(120) {
         out.push_str(&format!(
-            "{},{},{},{},{},0x{:x},0x{:x},0x{:x},0x{:x},0x{:x},0x{:x},{}\n",
+            "{},{},{},{},{},{},0x{:x},0x{:x},0x{:x},0x{:x},0x{:x},0x{:x},{}\n",
             rank + 1,
             sc,
             sc * scale,
             bytes * scale,
             live * scale,
+            max,
             pcs[0],
             pcs[1],
             pcs[2],
@@ -376,6 +390,7 @@ extern "C" fn sigprof_handler(
             sampled_count: 0,
             sampled_bytes: 0,
             live_bytes: 0,
+            max_sample_bytes: 0,
             pcs: top,
         });
         e.sampled_count += 1;
@@ -420,6 +435,7 @@ extern "C" fn sigprof_handler(
                 sampled_count: 0,
                 sampled_bytes: 0,
                 live_bytes: 0,
+                max_sample_bytes: 0,
                 pcs: top,
             });
             e.sampled_count += 1;
