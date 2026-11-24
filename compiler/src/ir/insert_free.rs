@@ -386,11 +386,17 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         | "haxe_string_print"
         | "haxe_string_println"
         | "haxe_stringmap_get"
-        | "haxe_stringmap_exists" => {
+        | "haxe_stringmap_get_typed"
+        | "haxe_stringmap_get_null_int"
+        | "haxe_stringmap_exists"
+        | "haxe_stringmap_remove"
+        | "haxe_std_parse_int"
+        | "haxe_std_parse_int_null_int"
+        | "haxe_std_parse_float"
+        | "haxe_array_join_typed" => {
             ids.copy_only_ids.insert(fid);
-            // `haxe_stringmap_get` is the one exception: it retains nothing,
-            // yet hands back the stored value itself.
-            if name != "haxe_stringmap_get" {
+            // The map reads retain nothing, yet hand back the stored value.
+            if !matches!(name, "haxe_stringmap_get" | "haxe_stringmap_get_typed") {
                 ids.nonaliasing_result_ids.insert(fid);
             }
         }
@@ -405,7 +411,10 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
             // hand back a stored element -- on an array of objects that is a
             // pointer punned into the integer.
             let base = name.strip_prefix("haxe_").unwrap_or(name);
-            if !matches!(base, "array_pop" | "array_pop_i64" | "array_get_i64") {
+            if !matches!(
+                base,
+                "array_pop" | "array_pop_i64" | "array_get_i64" | "array_get_typed"
+            ) {
                 ids.nonaliasing_result_ids.insert(fid);
             }
         }
@@ -459,6 +468,12 @@ fn is_safe_array_op(name: &str) -> bool {
             | "array_contains"
             | "array_index_of"
             | "array_last_index_of"
+            | "array_get_typed"
+            | "array_set_typed"
+            | "array_push_typed"
+            | "array_mark_elem_kind"
+            | "array_mark_slot_layout"
+            | "array_init_element_tag"
     )
 }
 
