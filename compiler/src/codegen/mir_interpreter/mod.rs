@@ -156,6 +156,9 @@ pub(crate) type CompileRequest =
 pub(crate) struct Program {
     symbols: RwLock<HashMap<String, usize>>,
     decoded: RwLock<HashMap<(usize, IrFunctionId), Arc<Function>>>,
+    /// Functions decoded once and not kept: one that runs only once (module
+    /// init, setup) would otherwise hold its decoded body for the whole run.
+    decoded_once: RwLock<std::collections::HashSet<(usize, IrFunctionId)>>,
     indirect: RwLock<HashMap<usize, Arc<BTreeSet<IrFunctionId>>>>,
     natives: RwLock<HashMap<IrFunctionId, usize>>,
     /// Set once compiled code is installed: hot loops then transfer to it.
@@ -179,6 +182,7 @@ impl Program {
         Self {
             symbols: RwLock::new(HashMap::new()),
             decoded: RwLock::new(HashMap::new()),
+            decoded_once: RwLock::new(std::collections::HashSet::new()),
             indirect: RwLock::new(HashMap::new()),
             natives: RwLock::new(HashMap::new()),
             compiled: AtomicBool::new(false),
@@ -268,6 +272,9 @@ impl Program {
     /// thread.
     pub(crate) fn install_native(&self, func: IrFunctionId, code: usize) {
         self.natives.write().unwrap().insert(func, code);
+        // Calls now go to the compiled code; frames already running keep the
+        // decoded body they hold.
+        self.decoded.write().unwrap().retain(|(_, f), _| *f != func);
         self.compiled.store(true, Ordering::Release);
         let stubs = trampoline::forward(func, code);
         // The runtime keys closures by code address; a stub handed out before
@@ -382,7 +389,10 @@ impl Machine {
             decode::decode(&self.program, module, id, &indirect)
                 .map_err(InterpError::RuntimeError)?,
         );
-        if cache {
+        if cache
+            && self.program.native(id).is_none()
+            && !self.program.decoded_once.write().unwrap().insert(key)
+        {
             self.program.decoded.write().unwrap().insert(key, f.clone());
         }
         Ok(f)
