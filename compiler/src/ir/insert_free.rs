@@ -283,10 +283,9 @@ impl OptimizationPass for InsertFreePass {
 
         // Per-parameter retention for module functions — lets a pointer flow
         // into a non-retaining wrapper (`lookup(key)` → stringmap_get) without
-        // counting as an escape. Opt-in (RZT_PARAM_RETENTION=1) while the
-        // remaining soundness hole is bisected: with it on, strings stored
-        // into result structs get freed (tok 4/32).
-        let param_retention = if std::env::var("RZT_PARAM_RETENTION").as_deref() == Ok("1") {
+        // counting as an escape. RZT_PARAM_RETENTION=0 turns it off (safe:
+        // every argument then counts as an escape).
+        let param_retention = if std::env::var("RZT_PARAM_RETENTION").as_deref() != Ok("0") {
             let r = compute_param_retention(module, &ids);
             if std::env::var_os("RZT_DBG_RETENTION").is_some() {
                 for (fid, mask) in &r {
@@ -4177,7 +4176,13 @@ fn compute_param_retention(
     let mut retention: BTreeMap<IrFunctionId, Vec<bool>> = BTreeMap::new();
     // Derived sets are body-static — compute once per parameter.
     let mut param_derived: BTreeMap<IrFunctionId, Vec<BTreeSet<IrId>>> = BTreeMap::new();
+    // Only bodies are analysed. A declaration is a runtime or plugin entry
+    // whose effect is unknown here, so it keeps no mask and its callers fall
+    // back to the verified lists.
     for (&fid, f) in &module.functions {
+        if f.cfg.blocks.is_empty() {
+            continue;
+        }
         retention.insert(fid, vec![false; f.signature.parameters.len()]);
         let sets = f
             .signature
@@ -4190,6 +4195,9 @@ fn compute_param_retention(
     loop {
         let mut changed = false;
         for (&fid, function) in &module.functions {
+            if !retention.contains_key(&fid) {
+                continue;
+            }
             for pi in 0..function.signature.parameters.len() {
                 if retention[&fid][pi] {
                     continue;
@@ -4299,13 +4307,52 @@ fn param_retained(
                         return true;
                     }
                 }
-                _ => {}
+                IrInstruction::MakeClosure {
+                    captured_values, ..
+                } if captured_values.iter().any(in_set) => return true,
+                // The arms above, when their guard does not hold, and the ops
+                // that only read the value or form an alias already in `derived`.
+                IrInstruction::Store { .. }
+                | IrInstruction::StoreGlobal { .. }
+                | IrInstruction::CreateStruct { .. }
+                | IrInstruction::MemCopy { .. }
+                | IrInstruction::Throw { .. }
+                | IrInstruction::Load { .. }
+                | IrInstruction::ArrayHeader { .. }
+                | IrInstruction::Return { .. }
+                | IrInstruction::CallIndirect { .. }
+                | IrInstruction::MakeClosure { .. }
+                | IrInstruction::GetElementPtr { .. }
+                | IrInstruction::PtrAdd { .. }
+                | IrInstruction::Cast { .. }
+                | IrInstruction::BitCast { .. }
+                | IrInstruction::SsaBarrier { .. }
+                | IrInstruction::Copy { .. }
+                | IrInstruction::Select { .. }
+                | IrInstruction::Cmp { .. }
+                | IrInstruction::BinOp { .. }
+                | IrInstruction::UnOp { .. }
+                | IrInstruction::Free { .. } => {}
+                // Anything else that reads the value may publish it.
+                other => {
+                    if other.uses().iter().any(in_set) {
+                        return true;
+                    }
+                }
             }
         }
-        if let IrTerminator::Return { value: Some(v) } = &block.terminator {
-            if in_set(v) {
-                return true;
-            }
+        // A merge gives the value a name `derived` does not follow.
+        if block
+            .phi_nodes
+            .iter()
+            .any(|phi| phi.incoming.iter().any(|(_, v)| in_set(v)))
+        {
+            return true;
+        }
+        match &block.terminator {
+            IrTerminator::Return { value: Some(v) } if in_set(v) => return true,
+            IrTerminator::NoReturn { call } if in_set(call) => return true,
+            _ => {}
         }
     }
     false
