@@ -63,6 +63,13 @@ struct AllocFuncIds {
     free_deep_ids: BTreeSet<IrFunctionId>,
     /// `_setjmp`, which returns again when an exception longjmps back to it.
     setjmp_ids: BTreeSet<IrFunctionId>,
+    /// Runtime producers of a fresh `HaxeBytes` the caller owns.
+    bytes_new_ids: BTreeSet<IrFunctionId>,
+    /// `haxe_bytes_free`, which drops one reference and releases the buffer
+    /// with the last.
+    bytes_free_ids: BTreeSet<IrFunctionId>,
+    /// Bytes ops that take the bytes as arg 0 and keep no reference to it.
+    bytes_safe_ids: BTreeSet<IrFunctionId>,
     /// Array ops that take the header as arg0 and DO NOT retain it past the
     /// call (scalar get/set/push/pop/length/…). Deliberately EXCLUDES the
     /// retaining/aliasing ops — iterator (holds the array) and the `_ptr`
@@ -110,6 +117,9 @@ impl OptimizationPass for InsertFreePass {
             setjmp_ids: BTreeSet::new(),
             array_safe_ids: BTreeSet::new(),
             nonaliasing_result_ids: BTreeSet::new(),
+            bytes_new_ids: BTreeSet::new(),
+            bytes_free_ids: BTreeSet::new(),
+            bytes_safe_ids: BTreeSet::new(),
         };
 
         // Only a DECLARATION is the runtime intrinsic. Haxe method names are
@@ -213,6 +223,34 @@ impl OptimizationPass for InsertFreePass {
                 },
             );
             ids.array_free_ids.insert(free_id);
+        }
+
+        // And haxe_bytes_free when bytes are made here.
+        if !ids.bytes_new_ids.is_empty() && ids.bytes_free_ids.is_empty() {
+            let free_id = module.alloc_function_id();
+            module.extern_functions.insert(
+                free_id,
+                super::modules::IrExternFunction {
+                    id: free_id,
+                    name: "haxe_bytes_free".to_string(),
+                    symbol_id: crate::tast::SymbolId::from_raw(0),
+                    signature: super::IrFunctionSignature {
+                        parameters: vec![super::functions::IrParameter {
+                            name: "bytes".to_string(),
+                            ty: IrType::Ptr(Box::new(IrType::U8)),
+                            reg: IrId(0),
+                            by_ref: false,
+                        }],
+                        return_type: IrType::Void,
+                        calling_convention: super::CallingConvention::C,
+                        can_throw: false,
+                        type_params: vec![],
+                        uses_sret: false,
+                    },
+                    source: "runtime".to_string(),
+                },
+            );
+            ids.bytes_free_ids.insert(free_id);
         }
 
         // Same for haxe_string_free when fresh-string producers are present.
@@ -355,6 +393,47 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         }
         "haxe_object_free_deep" => {
             ids.free_deep_ids.insert(fid);
+        }
+        // Each returns a new `HaxeBytes` with one reference, or a view that
+        // holds a counted reference to its owner. `haxe_bytes_of_data` is not
+        // here: it can register the bytes against the array it came from.
+        "haxe_bytes_alloc" | "haxe_bytes_sub" | "haxe_bytes_sub_i64" => {
+            ids.bytes_new_ids.insert(fid);
+        }
+        // These also copy the string or array they read.
+        "haxe_bytes_of_string" | "haxe_bytes_of_hex" | "haxe_bytes_of_int_array" => {
+            ids.bytes_new_ids.insert(fid);
+            ids.copy_only_ids.insert(fid);
+            ids.nonaliasing_result_ids.insert(fid);
+        }
+        "haxe_bytes_free" => {
+            ids.bytes_free_ids.insert(fid);
+        }
+        // Read or write the bytes in place, keep nothing. A sub view counts
+        // its owner, so the owner's release only drops a reference.
+        "haxe_bytes_get"
+        | "haxe_bytes_set"
+        | "haxe_bytes_length"
+        | "haxe_bytes_fill"
+        | "haxe_bytes_get_int16"
+        | "haxe_bytes_get_uint16"
+        | "haxe_bytes_get_int32"
+        | "haxe_bytes_get_int64"
+        | "haxe_bytes_get_float"
+        | "haxe_bytes_get_double"
+        | "haxe_bytes_set_int16"
+        | "haxe_bytes_set_int32"
+        | "haxe_bytes_set_int64"
+        | "haxe_bytes_set_float"
+        | "haxe_bytes_set_double"
+        | "haxe_bytes_to_hex" => {
+            ids.bytes_safe_ids.insert(fid);
+            ids.nonaliasing_result_ids.insert(fid);
+        }
+        // Copy between or compare two byte buffers, keeping neither.
+        "haxe_bytes_blit" | "haxe_bytes_blit_into" | "haxe_bytes_compare" => {
+            ids.copy_only_ids.insert(fid);
+            ids.nonaliasing_result_ids.insert(fid);
         }
         // Verified Box-fresh string producers; their string INPUTS are
         // read-and-copied (never retained), so they are also safe consumers.
@@ -661,6 +740,7 @@ fn already_released(
     array_free_id: Option<IrFunctionId>,
     anon_drop_id: Option<IrFunctionId>,
     free_deep_id: Option<IrFunctionId>,
+    bytes_free_id: Option<IrFunctionId>,
 ) -> bool {
     function.cfg.blocks.values().any(|b| {
         b.instructions.iter().any(|i| match i {
@@ -675,7 +755,8 @@ fn already_released(
                     && (Some(*func_id) == string_free_id
                         || Some(*func_id) == array_free_id
                         || Some(*func_id) == anon_drop_id
-                        || Some(*func_id) == free_deep_id)
+                        || Some(*func_id) == free_deep_id
+                        || Some(*func_id) == bytes_free_id)
             }
             _ => false,
         })
@@ -709,6 +790,7 @@ fn insert_free_for_function(
     let mut array_alloc_ids: BTreeSet<IrId> = BTreeSet::new();
     let mut received_array_ids: BTreeSet<IrId> = BTreeSet::new();
     let mut string_alloc_ids: BTreeSet<IrId> = BTreeSet::new();
+    let mut bytes_alloc_ids: BTreeSet<IrId> = BTreeSet::new();
     for block in function.cfg.blocks.values() {
         for inst in &block.instructions {
             match inst {
@@ -754,6 +836,14 @@ fn insert_free_for_function(
                     alloc_ids.push(*dest);
                     string_alloc_ids.insert(*dest);
                 }
+                IrInstruction::CallDirect {
+                    dest: Some(dest),
+                    func_id,
+                    ..
+                } if ids.bytes_new_ids.contains(func_id) => {
+                    alloc_ids.push(*dest);
+                    bytes_alloc_ids.insert(*dest);
+                }
                 _ => {}
             }
         }
@@ -769,16 +859,19 @@ fn insert_free_for_function(
     let mut dealloc_ids: BTreeSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
     dealloc_ids.extend(ids.array_free_ids.iter().cloned());
     dealloc_ids.extend(ids.string_free_ids.iter().cloned());
+    dealloc_ids.extend(ids.bytes_free_ids.iter().cloned());
 
     for &alloc_id in &alloc_ids {
         let derived = build_derived_set(alloc_id, function);
         let is_anon = anon_alloc_ids.contains(&alloc_id);
+        let is_bytes = bytes_alloc_ids.contains(&alloc_id);
         let is_string = string_alloc_ids.contains(&alloc_id);
         // A malloc'd HaxeArray header: the alloc (or a derived / loop-invariant
         // alias) is used as arg0 of a non-retaining array op — or the value was
         // RECEIVED from a returns-fresh-array callee (known array by type, even
         // if the caller never touches it). Released via haxe_array_free + Free.
         let is_array = !is_string
+            && !is_bytes
             && (received_array_ids.contains(&alloc_id)
                 || (!is_anon && is_array_header(&derived, function, &ids.array_safe_ids)));
         if is_array {
@@ -805,7 +898,9 @@ fn insert_free_for_function(
         // Anon and array allocs each whitelist their own safe accessors;
         // string consumers are all in copy_only_ids (checked unconditionally).
         let empty = BTreeSet::new();
-        let safe_ids = if is_array {
+        let safe_ids = if is_bytes {
+            &ids.bytes_safe_ids
+        } else if is_array {
             &ids.array_safe_ids
         } else if is_anon {
             &ids.anon_safe_ids
@@ -823,7 +918,8 @@ fn insert_free_for_function(
         );
         if !escapes {
             allocs_needing_free.push(alloc_id);
-        } else {
+        } else if !is_bytes {
+            // Bytes are never adopted: an owner's release frees objects only.
             escaped_candidates.push(alloc_id);
         }
     }
@@ -943,6 +1039,7 @@ fn insert_free_for_function(
     // ...and haxe_string_free for fresh strings.
     let string_free_id = ids.string_free_ids.iter().next().cloned();
     let free_deep_id = ids.free_deep_ids.iter().next().cloned();
+    let bytes_free_id = ids.bytes_free_ids.iter().next().cloned();
 
     // Step 4: Insert Free/Drop for each non-escaping alloc.
     // For allocs defined in the entry block (which dominates all returns), insert at return blocks.
@@ -969,6 +1066,7 @@ fn insert_free_for_function(
                     || fresh_object_fns.contains(func_id)
                     || ids.ext_fresh_string_ids.contains(func_id)
                     || fresh_string_fns.contains(func_id)
+                    || ids.bytes_new_ids.contains(func_id)
                 {
                     alloc_def_block.insert(*dest, block_id);
                 }
@@ -984,7 +1082,12 @@ fn insert_free_for_function(
     // rotation phi merges two different allocations, which the general phi rule
     // reads as an escape. The rotation analysis re-tests them with that one phi
     // excused, so it takes the full alloc list rather than the filtered set.
-    let rotations = find_rotation_releases(function, &alloc_ids, &ids, param_retention);
+    let rotation_candidates: Vec<IrId> = alloc_ids
+        .iter()
+        .copied()
+        .filter(|a| !bytes_alloc_ids.contains(a))
+        .collect();
+    let rotations = find_rotation_releases(function, &rotation_candidates, ids, param_retention);
     let rotation_handled: BTreeSet<IrId> = rotations
         .iter()
         .flat_map(|(_, _, carried)| carried.iter().copied())
@@ -1071,6 +1174,11 @@ fn insert_free_for_function(
                             .push(IrInstruction::Free { ptr: alloc_id });
                         inserted += 1;
                     }
+                } else if bytes_alloc_ids.contains(&alloc_id) {
+                    if let Some(fid) = bytes_free_id {
+                        block.instructions.push(release_call(fid, alloc_id));
+                        inserted += 1;
+                    }
                 } else if anon_alloc_ids.contains(&alloc_id) {
                     if let Some(drop_id) = anon_drop_id {
                         block.instructions.push(IrInstruction::CallDirect {
@@ -1115,7 +1223,8 @@ fn insert_free_for_function(
         if !array_confined_to_block(derived, def_block, function) {
             let plain_instance = !is_string
                 && !array_alloc_ids.contains(&alloc_id)
-                && !anon_alloc_ids.contains(&alloc_id);
+                && !anon_alloc_ids.contains(&alloc_id)
+                && !bytes_alloc_ids.contains(&alloc_id);
             if plain_instance {
                 let nulls = null_consts(function);
                 if let Some((merge_block, value)) =
@@ -1170,6 +1279,13 @@ fn insert_free_for_function(
                     .push(IrInstruction::Free { ptr: alloc_id });
                 inserted += 1;
             }
+        } else if bytes_alloc_ids.contains(&alloc_id) {
+            if let (Some(fid), Some(block)) =
+                (bytes_free_id, function.cfg.blocks.get_mut(&def_block))
+            {
+                block.instructions.push(release_call(fid, alloc_id));
+                inserted += 1;
+            }
         } else if let Some(block) = function.cfg.blocks.get_mut(&def_block) {
             // A class instance is a single allocation: a plain release, never
             // the array routine, which would also free a buffer it does not own.
@@ -1196,6 +1312,7 @@ fn insert_free_for_function(
             array_free_id,
             anon_drop_id,
             free_deep_id,
+            bytes_free_id,
         ) {
             continue;
         }
@@ -1233,6 +1350,11 @@ fn insert_free_for_function(
                 block
                     .instructions
                     .push(IrInstruction::Free { ptr: alloc_id });
+                inserted += 1;
+            }
+        } else if bytes_alloc_ids.contains(&alloc_id) {
+            if let Some(fid) = bytes_free_id {
+                block.instructions.push(release_call(fid, alloc_id));
                 inserted += 1;
             }
         } else if anon_alloc_ids.contains(&alloc_id) {
@@ -1286,6 +1408,7 @@ fn insert_free_for_function(
                 array_free_id,
                 anon_drop_id,
                 free_deep_id,
+                bytes_free_id,
             )
         {
             continue;
@@ -1311,6 +1434,10 @@ fn insert_free_for_function(
                         IrInstruction::Free { ptr: alloc_id },
                     ]
                 })
+                .unwrap_or_default()
+        } else if bytes_alloc_ids.contains(&alloc_id) {
+            bytes_free_id
+                .map(|fid| vec![release_call(fid, alloc_id)])
                 .unwrap_or_default()
         } else if anon_alloc_ids.contains(&alloc_id) {
             anon_drop_id
@@ -1508,9 +1635,11 @@ fn insert_free_for_function(
             &string_alloc_ids,
             &array_alloc_ids,
             &anon_alloc_ids,
+            &bytes_alloc_ids,
             string_free_id,
             array_free_id,
             anon_drop_id,
+            bytes_free_id,
         );
     }
 
@@ -1532,7 +1661,8 @@ fn keep_releases_before_setjmp(function: &mut IrFunction, ids: &AllocFuncIds) {
                     || ids.string_free_ids.contains(func_id)
                     || ids.array_free_ids.contains(func_id)
                     || ids.anon_drop_ids.contains(func_id)
-                    || ids.free_deep_ids.contains(func_id) =>
+                    || ids.free_deep_ids.contains(func_id)
+                    || ids.bytes_free_ids.contains(func_id) =>
             {
                 args.first().copied()
             }
@@ -1591,9 +1721,11 @@ fn record_free_graph(
     string_alloc_ids: &BTreeSet<IrId>,
     array_alloc_ids: &BTreeSet<IrId>,
     anon_alloc_ids: &BTreeSet<IrId>,
+    bytes_alloc_ids: &BTreeSet<IrId>,
     string_free_id: Option<IrFunctionId>,
     array_free_id: Option<IrFunctionId>,
     anon_drop_id: Option<IrFunctionId>,
+    bytes_free_id: Option<IrFunctionId>,
 ) {
     use crate::ir::free_graph as fg;
 
@@ -1652,6 +1784,8 @@ fn record_free_graph(
                         fg::Release::ArrayFreeThenHeader
                     } else if Some(*func_id) == anon_drop_id {
                         fg::Release::AnonDrop
+                    } else if Some(*func_id) == bytes_free_id {
+                        fg::Release::BytesFree
                     } else {
                         continue;
                     };
@@ -1677,6 +1811,8 @@ fn record_free_graph(
                 "array"
             } else if anon_alloc_ids.contains(id) {
                 "anon"
+            } else if bytes_alloc_ids.contains(id) {
+                "bytes"
             } else {
                 "plain"
             };
