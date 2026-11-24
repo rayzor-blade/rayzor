@@ -644,7 +644,7 @@ fn remap_instruction(
     inst: &IrInstruction,
     reg_map: &mut BTreeMap<IrId, IrId>,
     next_reg: &mut u32,
-    register_types: &mut BTreeMap<IrId, IrType>,
+    register_types: &mut crate::ir::vec_map::VecMap<IrId, IrType>,
 ) -> IrInstruction {
     // Helper to remap a register, creating a new one if it's a definition
     let map_use =
@@ -653,7 +653,7 @@ fn remap_instruction(
     let alloc_new = |old: IrId,
                      next_reg: &mut u32,
                      reg_map: &mut BTreeMap<IrId, IrId>,
-                     register_types: &mut BTreeMap<IrId, IrType>|
+                     register_types: &mut crate::ir::vec_map::VecMap<IrId, IrType>|
      -> IrId {
         let new = IrId::new(*next_reg);
         *next_reg += 1;

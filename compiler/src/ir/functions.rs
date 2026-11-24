@@ -32,11 +32,11 @@ pub struct IrFunction {
     pub cfg: IrControlFlowGraph,
 
     /// Local variable declarations
-    pub locals: BTreeMap<IrId, IrLocal>,
+    pub locals: super::vec_map::VecMap<IrId, IrLocal>,
 
     /// Type information for all registers (parameters and intermediate values)
     /// This is populated by MirBuilder to enable type inference in backends
-    pub register_types: BTreeMap<IrId, IrType>,
+    pub register_types: super::vec_map::VecMap<IrId, IrType>,
 
     /// Function attributes
     pub attributes: FunctionAttributes,
@@ -294,8 +294,8 @@ impl IrFunction {
             qualified_name: None, // Set later during lowering
             signature,
             cfg: IrControlFlowGraph::new(),
-            locals: BTreeMap::new(),
-            register_types: BTreeMap::new(),
+            locals: Default::default(),
+            register_types: Default::default(),
             attributes: FunctionAttributes::default(),
             kind: FunctionKind::UserDefined,
             source_location: IrSourceLocation::unknown(),

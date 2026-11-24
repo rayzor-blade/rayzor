@@ -1049,7 +1049,7 @@ impl<'a> FunctionBuilder<'a> {
         let next_reg_id = self.params.len() as u32;
 
         // Build register_types map with parameter types BEFORE moving self.params
-        let mut register_types = BTreeMap::new();
+        let mut register_types = crate::ir::vec_map::VecMap::new();
         for (i, param) in self.params.iter().enumerate() {
             register_types.insert(IrId(i as u32), param.ty.clone());
         }
@@ -1078,7 +1078,7 @@ impl<'a> FunctionBuilder<'a> {
         // For extern functions, create an empty CFG without the default entry block
         let cfg = if self.is_extern {
             IrControlFlowGraph {
-                blocks: std::collections::BTreeMap::new(),
+                blocks: Default::default(),
                 entry_block: IrBlockId::entry(),
                 next_block_id: 0,
             }
@@ -1093,7 +1093,7 @@ impl<'a> FunctionBuilder<'a> {
             qualified_name: None,
             signature,
             cfg,
-            locals: BTreeMap::new(),
+            locals: Default::default(),
             register_types,
             attributes,
             kind: FunctionKind::MirWrapper, // MIR builder creates stdlib wrapper functions

@@ -593,8 +593,8 @@ impl<'a> HirToMirContext<'a> {
             qualified_name: Some(name.to_string()),
             signature,
             cfg: IrControlFlowGraph::new(), // Empty - will be replaced during merge
-            locals: BTreeMap::new(),
-            register_types: BTreeMap::new(),
+            locals: Default::default(),
+            register_types: Default::default(),
             attributes,
             kind: FunctionKind::MirWrapper,
             source_location: IrSourceLocation::unknown(),

@@ -3080,7 +3080,7 @@ impl TieredBackend {
         use crate::ir::types::{IrType, IrValue};
         use crate::ir::{BinaryOp, IrId};
         let mut next = function.next_reg_id;
-        let mut fresh = |types: &mut BTreeMap<IrId, IrType>, ty: IrType| {
+        let mut fresh = |types: &mut crate::ir::vec_map::VecMap<IrId, IrType>, ty: IrType| {
             let reg = IrId::new(next);
             next += 1;
             types.insert(reg, ty);
@@ -4986,7 +4986,7 @@ impl BackgroundTierUp {
             qualified_name: qualified_name.clone(),
             signature: signature.clone(),
             cfg: crate::ir::IrControlFlowGraph::new(),
-            locals: BTreeMap::new(),
+            locals: Default::default(),
             register_types: register_types
                 .iter()
                 .filter(|(_, ty)| wide(ty))

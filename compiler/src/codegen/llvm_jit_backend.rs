@@ -4078,7 +4078,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     fn compile_instruction(
         &mut self,
         inst: &IrInstruction,
-        register_types: &BTreeMap<IrId, IrType>,
+        register_types: &crate::ir::vec_map::VecMap<IrId, IrType>,
     ) -> Result<(), String> {
         match inst {
             IrInstruction::Const { dest, value } => {

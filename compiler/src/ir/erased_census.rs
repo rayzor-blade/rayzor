@@ -29,7 +29,7 @@ fn is_word(ty: &IrType) -> bool {
 
 /// Register types, constants included: a constant's register has no entry
 /// in `register_types`.
-fn register_types(function: &IrFunction) -> BTreeMap<IrId, IrType> {
+fn register_types(function: &IrFunction) -> crate::ir::vec_map::VecMap<IrId, IrType> {
     let mut types = function.register_types.clone();
     for p in &function.signature.parameters {
         types.entry(p.reg).or_insert_with(|| p.ty.clone());

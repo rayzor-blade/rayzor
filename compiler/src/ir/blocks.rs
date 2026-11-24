@@ -223,7 +223,7 @@ impl IrBasicBlock {
 pub struct IrControlFlowGraph {
     /// All basic blocks in the function
     /// Uses BTreeMap for deterministic iteration order (sorted by block ID)
-    pub blocks: std::collections::BTreeMap<IrBlockId, IrBasicBlock>,
+    pub blocks: super::vec_map::VecMap<IrBlockId, IrBasicBlock>,
 
     /// Entry block ID
     pub entry_block: IrBlockId,
@@ -235,7 +235,7 @@ pub struct IrControlFlowGraph {
 impl IrControlFlowGraph {
     /// Create a new CFG with an entry block
     pub fn new() -> Self {
-        let mut blocks = std::collections::BTreeMap::new();
+        let mut blocks = super::vec_map::VecMap::new();
         let entry_block = IrBlockId::entry();
         blocks.insert(entry_block, IrBasicBlock::new(entry_block));
 

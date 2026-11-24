@@ -518,12 +518,12 @@ impl<'a> HirToMirContext<'a> {
             qualified_name: None,
             signature: signature.clone(),
             cfg: crate::ir::blocks::IrControlFlowGraph {
-                blocks: std::collections::BTreeMap::new(), // Empty blocks = extern
+                blocks: Default::default(), // Empty blocks = extern
                 entry_block: IrBlockId(0),
                 next_block_id: 0,
             },
-            locals: std::collections::BTreeMap::new(),
-            register_types: std::collections::BTreeMap::new(),
+            locals: Default::default(),
+            register_types: Default::default(),
             attributes: crate::ir::functions::FunctionAttributes::default(),
             kind: crate::ir::functions::FunctionKind::ExternC,
             source_location: IrSourceLocation::unknown(),

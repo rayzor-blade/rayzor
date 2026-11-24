@@ -533,7 +533,7 @@ impl Monomorphizer {
         }
 
         // Substitute types in register_types
-        let mut new_register_types = BTreeMap::new();
+        let mut new_register_types = crate::ir::vec_map::VecMap::new();
         for (id, ty) in &specialized.register_types {
             new_register_types.insert(*id, self.substitute_type(ty));
         }
@@ -1793,7 +1793,7 @@ impl Monomorphizer {
         specialized.signature = self.substitute_signature(&specialized.signature);
 
         // Substitute types in register_types
-        let mut new_register_types = BTreeMap::new();
+        let mut new_register_types = crate::ir::vec_map::VecMap::new();
         for (id, ty) in &specialized.register_types {
             new_register_types.insert(*id, self.substitute_type(ty));
         }
