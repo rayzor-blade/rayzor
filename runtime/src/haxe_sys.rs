@@ -740,8 +740,21 @@ pub extern "C" fn haxe_null_int_to_string(value: i64) -> *mut HaxeString {
 /// The bytes are NOT copied - they must remain valid (e.g., in JIT code section)
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_string_literal(ptr: *const u8, len: usize) -> *mut HaxeString {
-    // cap=0 means static/borrowed, don't free the data
-    Box::into_raw(Box::new(HaxeString::from_parts(ptr as *mut u8, len, 0)))
+    // A literal's bytes live for the process and nothing releases a literal,
+    // so each thread makes one header per literal and hands it out every
+    // time. cap=0: the bytes are borrowed.
+    thread_local! {
+        static LITERALS: std::cell::RefCell<HashMap<(usize, usize), usize>> =
+            std::cell::RefCell::new(HashMap::default());
+    }
+    let make = || Box::into_raw(Box::new(HaxeString::from_parts(ptr as *mut u8, len, 0)));
+    LITERALS
+        .try_with(|m| {
+            *m.borrow_mut()
+                .entry((ptr as usize, len))
+                .or_insert_with(|| make() as usize) as *mut HaxeString
+        })
+        .unwrap_or_else(|_| make())
 }
 
 /// Convert string to uppercase (wrapper returning pointer)
@@ -3573,7 +3586,12 @@ pub extern "C" fn haxe_bytes_get_data(
     bytes: *const HaxeBytes,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::{HaxeArray, haxe_array_new, haxe_array_push_i64};
-    let arr = Box::into_raw(Box::new(unsafe { std::mem::zeroed::<HaxeArray>() }));
+    // A malloc'd header like the ones compiled code builds, so the caller's
+    // release (`haxe_array_free`, then `free`) can take it.
+    let arr = unsafe { libc::calloc(1, std::mem::size_of::<HaxeArray>()) as *mut HaxeArray };
+    if arr.is_null() {
+        return arr;
+    }
     haxe_array_new(arr, 8);
     if bytes.is_null() {
         return arr;

@@ -70,6 +70,8 @@ struct AllocFuncIds {
     bytes_free_ids: BTreeSet<IrFunctionId>,
     /// Bytes ops that take the bytes as arg 0 and keep no reference to it.
     bytes_safe_ids: BTreeSet<IrFunctionId>,
+    /// Runtime producers of a fresh array with a malloc'd header.
+    ext_fresh_array_ids: BTreeSet<IrFunctionId>,
     /// Array ops that take the header as arg0 and DO NOT retain it past the
     /// call (scalar get/set/push/pop/length/…). Deliberately EXCLUDES the
     /// retaining/aliasing ops — iterator (holds the array) and the `_ptr`
@@ -120,6 +122,7 @@ impl OptimizationPass for InsertFreePass {
             bytes_new_ids: BTreeSet::new(),
             bytes_free_ids: BTreeSet::new(),
             bytes_safe_ids: BTreeSet::new(),
+            ext_fresh_array_ids: BTreeSet::new(),
         };
 
         // Only a DECLARATION is the runtime intrinsic. Haxe method names are
@@ -427,6 +430,17 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         | "haxe_bytes_set_double"
         | "haxe_bytes_to_hex" => {
             ids.bytes_safe_ids.insert(fid);
+            ids.nonaliasing_result_ids.insert(fid);
+        }
+        // A copy of the bytes as an array, which the data-view registry links
+        // back to them until either is released; both releases unlink it.
+        "haxe_bytes_get_data" => {
+            ids.ext_fresh_array_ids.insert(fid);
+            ids.bytes_safe_ids.insert(fid);
+            ids.nonaliasing_result_ids.insert(fid);
+        }
+        "haxe_bytes_fast_get" => {
+            ids.copy_only_ids.insert(fid);
             ids.nonaliasing_result_ids.insert(fid);
         }
         // Copy between or compare two byte buffers, keeping neither.
@@ -812,7 +826,7 @@ fn insert_free_for_function(
                     dest: Some(dest),
                     func_id,
                     ..
-                } if fresh_fns.contains(func_id) => {
+                } if fresh_fns.contains(func_id) || ids.ext_fresh_array_ids.contains(func_id) => {
                     alloc_ids.push(*dest);
                     received_array_ids.insert(*dest);
                 }
@@ -1066,6 +1080,7 @@ fn insert_free_for_function(
                     || ids.ext_fresh_string_ids.contains(func_id)
                     || fresh_string_fns.contains(func_id)
                     || ids.bytes_new_ids.contains(func_id)
+                    || ids.ext_fresh_array_ids.contains(func_id)
                 {
                     alloc_def_block.insert(*dest, block_id);
                 }
