@@ -474,6 +474,152 @@ impl Drop for FreeGraphFlush {
     }
 }
 
+fn release_call(func_id: IrFunctionId, value: IrId) -> IrInstruction {
+    IrInstruction::CallDirect {
+        dest: None,
+        func_id,
+        args: vec![value],
+        arg_ownership: vec![OwnershipMode::Move],
+        type_args: vec![],
+        is_tail_call: false,
+    }
+}
+
+/// Whether a block reads any of `values` in its instructions, and in its
+/// terminator.
+fn block_reads(block: &super::blocks::IrBasicBlock, values: &BTreeSet<IrId>) -> (bool, bool) {
+    let in_body = block
+        .instructions
+        .iter()
+        .any(|inst| inst.uses().iter().any(|u| values.contains(u)));
+    let in_term = match &block.terminator {
+        IrTerminator::CondBranch { condition, .. } => values.contains(condition),
+        IrTerminator::Switch { value, .. } => values.contains(value),
+        IrTerminator::Return { value: Some(v) } => values.contains(v),
+        IrTerminator::NoReturn { call } => values.contains(call),
+        _ => false,
+    };
+    (in_body, in_term)
+}
+
+/// The block whose end releases a value defined once per run of `def_block`
+/// and read in later blocks.
+///
+/// The region is what runs after the definition until the function returns
+/// or the defining block runs again. The chosen block `R` is dominated by the
+/// definition, lies on every path through the region (a path that ends in a
+/// throw may skip it and leak), is not read by its own terminator, reaches no
+/// further read, and cannot run twice before the definition does. No phi may
+/// carry the value: a merge gives it a second name this walk does not follow.
+fn region_release(
+    derived: &BTreeSet<IrId>,
+    def_block: IrBlockId,
+    function: &IrFunction,
+    domtree: &crate::ir::loop_analysis::DominatorTree,
+) -> Option<IrBlockId> {
+    let blocks = &function.cfg.blocks;
+    if blocks.values().any(|b| {
+        b.phi_nodes
+            .iter()
+            .any(|phi| phi.incoming.iter().any(|(_, v)| derived.contains(v)))
+    }) {
+        return None;
+    }
+    // Region: blocks reached from the definition without running it again.
+    let mut region: Vec<IrBlockId> = Vec::new();
+    let mut in_region: BTreeSet<IrBlockId> = BTreeSet::new();
+    let mut work: Vec<IrBlockId> = vec![def_block];
+    while let Some(b) = work.pop() {
+        if !in_region.insert(b) {
+            continue;
+        }
+        region.push(b);
+        for s in blocks.get(&b)?.successors() {
+            if s != def_block {
+                work.push(s);
+            }
+        }
+    }
+    let succs = |b: IrBlockId| -> Vec<IrBlockId> {
+        blocks
+            .get(&b)
+            .map(|blk| {
+                blk.successors()
+                    .into_iter()
+                    .filter(|s| *s != def_block)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let leaves = |b: IrBlockId| -> bool {
+        blocks.get(&b).is_some_and(|blk| {
+            matches!(blk.terminator, IrTerminator::Return { .. })
+                || blk.successors().contains(&def_block)
+        })
+    };
+    // Post-dominators over the region. A block that only reaches a throw or
+    // an unreachable end constrains nothing.
+    let all: BTreeSet<IrBlockId> = in_region.clone();
+    let mut pdom: BTreeMap<IrBlockId, BTreeSet<IrBlockId>> =
+        region.iter().map(|&b| (b, all.clone())).collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in region.iter().rev() {
+            let mut next: Option<BTreeSet<IrBlockId>> = if leaves(b) {
+                Some(BTreeSet::new())
+            } else {
+                None
+            };
+            for s in succs(b) {
+                let ps = &pdom[&s];
+                next = Some(match next {
+                    None => ps.clone(),
+                    Some(n) => n.intersection(ps).copied().collect(),
+                });
+            }
+            let mut next = next.unwrap_or_else(|| all.clone());
+            next.insert(b);
+            if next != pdom[&b] {
+                pdom.insert(b, next);
+                changed = true;
+            }
+        }
+    }
+    let reads: BTreeMap<IrBlockId, (bool, bool)> = region
+        .iter()
+        .map(|&b| (b, block_reads(&blocks[&b], derived)))
+        .collect();
+    // Nearest post-dominator first: the one with the most post-dominators.
+    let mut candidates: Vec<IrBlockId> = pdom[&def_block]
+        .iter()
+        .copied()
+        .filter(|&b| b != def_block && domtree.dominates(def_block, b))
+        .collect();
+    candidates.sort_by_key(|b| std::cmp::Reverse(pdom[b].len()));
+    'next: for r in candidates {
+        if reads[&r].1 {
+            continue;
+        }
+        let mut seen: BTreeSet<IrBlockId> = BTreeSet::new();
+        let mut work = succs(r);
+        while let Some(b) = work.pop() {
+            if b == r {
+                continue 'next;
+            }
+            if !seen.insert(b) {
+                continue;
+            }
+            if reads[&b].0 || reads[&b].1 {
+                continue 'next;
+            }
+            work.extend(succs(b));
+        }
+        return Some(r);
+    }
+    None
+}
+
 /// Whether this value is already released anywhere in the function.
 ///
 /// A release takes five shapes — a bare `Free` for a plain allocation, and a
@@ -1108,6 +1254,61 @@ fn insert_free_for_function(
             block
                 .instructions
                 .push(IrInstruction::Free { ptr: *carried });
+            inserted += 1;
+        }
+    }
+
+    // Inner allocations no rule above placed: release them where every path
+    // from the definition has passed its last use.
+    let owners: BTreeSet<IrId> = adopted.keys().copied().collect();
+    let mut domtree = None;
+    for &alloc_id in &inner_allocs {
+        if owners.contains(&alloc_id)
+            || already_released(
+                function,
+                alloc_id,
+                string_free_id,
+                array_free_id,
+                anon_drop_id,
+                free_deep_id,
+            )
+        {
+            continue;
+        }
+        let Some(&def_block) = alloc_def_block.get(&alloc_id) else {
+            continue;
+        };
+        let domtree = domtree
+            .get_or_insert_with(|| crate::ir::loop_analysis::DominatorTree::compute(function));
+        let Some(at) = region_release(&derived_sets[&alloc_id], def_block, function, domtree)
+        else {
+            continue;
+        };
+        let insts: Vec<IrInstruction> = if string_alloc_ids.contains(&alloc_id) {
+            string_free_id
+                .map(|fid| vec![release_call(fid, alloc_id)])
+                .unwrap_or_default()
+        } else if array_alloc_ids.contains(&alloc_id) {
+            array_free_id
+                .map(|fid| {
+                    vec![
+                        release_call(fid, alloc_id),
+                        IrInstruction::Free { ptr: alloc_id },
+                    ]
+                })
+                .unwrap_or_default()
+        } else if anon_alloc_ids.contains(&alloc_id) {
+            anon_drop_id
+                .map(|fid| vec![release_call(fid, alloc_id)])
+                .unwrap_or_default()
+        } else {
+            vec![IrInstruction::Free { ptr: alloc_id }]
+        };
+        if insts.is_empty() {
+            continue;
+        }
+        if let Some(block) = function.cfg.blocks.get_mut(&at) {
+            block.instructions.extend(insts);
             inserted += 1;
         }
     }
