@@ -1596,6 +1596,7 @@ fn run_file(
         }
     }
     let _loaded_native_libs = loaded_native_libs; // keep alive past compile
+    startup_times::finished("native libs and plugins");
 
     // Extract compiler plugins from rpkg packages
     for rpkg in &mut loaded_rpkgs {
@@ -1773,6 +1774,7 @@ fn run_file(
         let fname = file.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
         run_cache_dir.join(format!("{}.mir.cache", fname))
     };
+    startup_times::finished("cache key");
 
     let (mir_module, _cache_hit) = 'load_mir: {
         // Try loading from MIR cache (source hash must match)
@@ -1809,6 +1811,7 @@ fn run_file(
                 if let Ok(module) =
                     postcard::from_bytes::<compiler::ir::IrModule>(&data[12 + diag_len..])
                 {
+                    startup_times::finished("MIR cache load");
                     break 'load_mir (module, true);
                 }
             }

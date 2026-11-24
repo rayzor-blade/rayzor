@@ -26,6 +26,21 @@ pub static FREE_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static FREE_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static LIVE_BYTES_PEAK: AtomicU64 = AtomicU64::new(0);
+/// The peak since the last `take_window_peak`.
+static WINDOW_PEAK: AtomicU64 = AtomicU64::new(0);
+
+/// Bytes allocated and not yet freed.
+pub fn live_bytes() -> u64 {
+    ALLOC_BYTES_TOTAL
+        .load(MemOrdering::Relaxed)
+        .saturating_sub(FREE_BYTES_TOTAL.load(MemOrdering::Relaxed))
+}
+
+/// The live-bytes peak since the previous call; the next window starts at
+/// the current live bytes.
+pub fn take_window_peak() -> u64 {
+    WINDOW_PEAK.swap(live_bytes(), MemOrdering::Relaxed)
+}
 
 static GRAPH_RATE: AtomicU64 = AtomicU64::new(0);
 static CPU_PROFILE_ACTIVE: AtomicU64 = AtomicU64::new(0);
@@ -46,16 +61,21 @@ std::thread_local! {
 #[derive(Default)]
 pub struct SiteStat {
     sampled_count: u64,
+    sampled_bytes: u64,
+    /// Sampled bytes not yet freed.
+    live_bytes: u64,
     pcs: [usize; 6],
 }
 
 pub static GRAPH_SITES: Mutex<Option<std::collections::HashMap<u64, SiteStat>>> = Mutex::new(None);
+/// Each sampled allocation still live: its site and size.
+static GRAPH_LIVE: Mutex<Option<std::collections::HashMap<usize, (u64, u64)>>> = Mutex::new(None);
 
 /// Hot path called from `TrackingAllocator::alloc` on every successful
 /// allocation. Cheap when `RAYZOR_ALLOC_GRAPH` isn't set (single atomic
 /// load + `IN_GRAPH` check + early return).
 #[inline(always)]
-fn record_sample() {
+fn record_sample(ptr: usize, size: u64) {
     let rate = GRAPH_RATE.load(MemOrdering::Relaxed);
     if rate == 0 || IN_GRAPH.with(|g| g.get()) {
         return;
@@ -87,14 +107,46 @@ fn record_sample() {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     top.hash(&mut h);
+    let site = h.finish();
+    if let Ok(mut g) = GRAPH_LIVE.lock()
+        && let Some(map) = g.as_mut()
+    {
+        map.insert(ptr, (site, size));
+    }
     if let Ok(mut g) = GRAPH_SITES.lock()
         && let Some(map) = g.as_mut()
     {
-        let e = map.entry(h.finish()).or_insert(SiteStat {
+        let e = map.entry(site).or_insert(SiteStat {
             sampled_count: 0,
+            sampled_bytes: 0,
+            live_bytes: 0,
             pcs: top,
         });
         e.sampled_count += 1;
+        e.sampled_bytes += size;
+        e.live_bytes += size;
+    }
+    IN_GRAPH.with(|g| g.set(false));
+}
+
+/// Take a freed allocation out of its site's live bytes, if it was sampled.
+#[inline(always)]
+fn forget_sample(ptr: usize) {
+    if GRAPH_RATE.load(MemOrdering::Relaxed) == 0 {
+        return;
+    }
+    let Ok(false) = IN_GRAPH.try_with(|g| g.replace(true)) else {
+        return;
+    };
+    let removed = GRAPH_LIVE
+        .lock()
+        .ok()
+        .and_then(|mut g| g.as_mut().and_then(|map| map.remove(&ptr)));
+    if let Some((site, size)) = removed
+        && let Ok(mut g) = GRAPH_SITES.lock()
+        && let Some(stat) = g.as_mut().and_then(|map| map.get_mut(&site))
+    {
+        stat.live_bytes = stat.live_bytes.saturating_sub(size);
     }
     IN_GRAPH.with(|g| g.set(false));
 }
@@ -138,9 +190,12 @@ pub extern "C" fn rayzor_dump_alloc_graph() {
     // operations during dump re-enter `record_sample` and deadlock on
     // the same Mutex.
     IN_GRAPH.with(|g| g.set(true));
-    let snapshot: Vec<(u64, [usize; 6])> = match GRAPH_SITES.lock() {
+    let snapshot: Vec<(u64, u64, u64, [usize; 6])> = match GRAPH_SITES.lock() {
         Ok(g) => match g.as_ref() {
-            Some(m) => m.values().map(|v| (v.sampled_count, v.pcs)).collect(),
+            Some(m) => m
+                .values()
+                .map(|v| (v.sampled_count, v.sampled_bytes, v.live_bytes, v.pcs))
+                .collect(),
             None => {
                 IN_GRAPH.with(|g| g.set(false));
                 return;
@@ -152,23 +207,51 @@ pub extern "C" fn rayzor_dump_alloc_graph() {
         }
     };
     let mut rows = snapshot;
-    rows.sort_by_key(|r| std::cmp::Reverse(r.0));
+    // Heaviest sites by bytes still live, then by bytes allocated; CPU
+    // samples carry no bytes.
+    rows.sort_by_key(|r| std::cmp::Reverse((r.2, r.1, r.0)));
     // In CPU-profile-only mode rate is 0; surface the raw sample count.
     let scale = if rate == 0 { 1 } else { rate };
-    let mut out = String::from("rank,sampled_allocs,est_total_allocs,pc1,pc2,pc3,pc4,pc5,pc6\n");
+    let mut out = String::from(
+        "rank,sampled_allocs,est_total_allocs,est_total_bytes,est_live_bytes,pc1,pc2,pc3,pc4,pc5,pc6,sym1,sym2,sym3,sym4,sym5,sym6\n",
+    );
+    // Resolved here, in the process, where the load addresses are known.
+    let mut names: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    let mut name_of = |pc: usize| -> String {
+        names
+            .entry(pc)
+            .or_insert_with(|| {
+                let mut name = String::from("?");
+                backtrace::resolve(pc as *mut std::ffi::c_void, |symbol| {
+                    if name == "?"
+                        && let Some(n) = symbol.name()
+                    {
+                        name = format!("{n:#}").replace(',', ";");
+                    }
+                });
+                name
+            })
+            .clone()
+    };
     let n = rows.len().min(120);
-    for (rank, (sc, pcs)) in rows.iter().enumerate().take(120) {
+    for (rank, (sc, bytes, live, pcs)) in rows.iter().enumerate().take(120) {
         out.push_str(&format!(
-            "{},{},{},0x{:x},0x{:x},0x{:x},0x{:x},0x{:x},0x{:x}\n",
+            "{},{},{},{},{},0x{:x},0x{:x},0x{:x},0x{:x},0x{:x},0x{:x},{}\n",
             rank + 1,
             sc,
             sc * scale,
+            bytes * scale,
+            live * scale,
             pcs[0],
             pcs[1],
             pcs[2],
             pcs[3],
             pcs[4],
-            pcs[5]
+            pcs[5],
+            pcs.iter()
+                .map(|&pc| name_of(pc))
+                .collect::<Vec<_>>()
+                .join(",")
         ));
     }
     let _ = std::fs::write("/tmp/rayzor_alloc_graph.csv", out);
@@ -291,6 +374,8 @@ extern "C" fn sigprof_handler(
     {
         let e = map.entry(h.finish()).or_insert(SiteStat {
             sampled_count: 0,
+            sampled_bytes: 0,
+            live_bytes: 0,
             pcs: top,
         });
         e.sampled_count += 1;
@@ -333,6 +418,8 @@ extern "C" fn sigprof_handler(
         if let Some(map) = g.as_mut() {
             let e = map.entry(h.finish()).or_insert(SiteStat {
                 sampled_count: 0,
+                sampled_bytes: 0,
+                live_bytes: 0,
                 pcs: top,
             });
             e.sampled_count += 1;
@@ -375,7 +462,8 @@ unsafe impl std::alloc::GlobalAlloc for TrackingAllocator {
                 ALLOC_COUNT.fetch_add(1, MemOrdering::Relaxed);
                 let live = (prev + sz).saturating_sub(FREE_BYTES_TOTAL.load(MemOrdering::Relaxed));
                 LIVE_BYTES_PEAK.fetch_max(live, MemOrdering::Relaxed);
-                record_sample();
+                WINDOW_PEAK.fetch_max(live, MemOrdering::Relaxed);
+                record_sample(p as usize, sz);
             }
             p
         }
@@ -386,6 +474,7 @@ unsafe impl std::alloc::GlobalAlloc for TrackingAllocator {
             std::alloc::System.dealloc(ptr, layout);
             FREE_BYTES_TOTAL.fetch_add(layout.size() as u64, MemOrdering::Relaxed);
             FREE_COUNT.fetch_add(1, MemOrdering::Relaxed);
+            forget_sample(ptr as usize);
         }
     }
 }
@@ -450,8 +539,9 @@ pub unsafe fn ensure_alloc_dump_hooks() {
                     .and_then(|s| s.parse::<u64>().ok())
                     .filter(|&n| n > 0)
                     .unwrap_or(1024);
-                GRAPH_RATE.store(r, MemOrdering::Relaxed);
                 *GRAPH_SITES.lock().unwrap() = Some(std::collections::HashMap::new());
+                *GRAPH_LIVE.lock().unwrap() = Some(std::collections::HashMap::new());
+                GRAPH_RATE.store(r, MemOrdering::Relaxed);
             }
             if std::env::var_os("RAYZOR_CPU_PROFILE").as_deref() == Some(std::ffi::OsStr::new("1"))
             {

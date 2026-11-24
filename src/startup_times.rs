@@ -1,12 +1,14 @@
 //! `RAYZOR_STARTUP_TIMES=1`: when each step of `rayzor run` finished, from
 //! process start, printed to stderr once the program returns. Off by default;
-//! safe to leave on, it only reads the clock at each step.
+//! safe to leave on, it only reads the clock at each step. A `--features
+//! profile` build also prints each step's live heap and its peak.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 static START: OnceLock<Instant> = OnceLock::new();
-static STEPS: Mutex<Vec<(&'static str, Instant)>> = Mutex::new(Vec::new());
+/// Each step's end, with the live heap and the step's peak when tracked.
+static STEPS: Mutex<Vec<(&'static str, Instant, Option<(u64, u64)>)>> = Mutex::new(Vec::new());
 
 fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -21,8 +23,24 @@ pub fn process_started() {
 /// Record that `step` has just finished.
 pub fn finished(step: &'static str) {
     if enabled() {
-        STEPS.lock().unwrap().push((step, Instant::now()));
+        STEPS
+            .lock()
+            .unwrap()
+            .push((step, Instant::now(), heap_at_step()));
     }
+}
+
+#[cfg(feature = "profile")]
+fn heap_at_step() -> Option<(u64, u64)> {
+    Some((
+        rayzor_runtime::live_bytes(),
+        rayzor_runtime::take_window_peak(),
+    ))
+}
+
+#[cfg(not(feature = "profile"))]
+fn heap_at_step() -> Option<(u64, u64)> {
+    None
 }
 
 /// Print each step with its end time and duration. `native` is the backend's
@@ -37,12 +55,21 @@ pub fn report(native_before_main: Duration, native_total: Duration, passes: u32,
     let steps = STEPS.lock().unwrap();
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     let mut previous = start;
-    eprintln!("[startup] {:>9} {:>9}  step", "at ms", "took ms");
-    for &(step, at) in steps.iter() {
+    let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+    eprintln!(
+        "[startup] {:>9} {:>9} {:>9} {:>9}  step",
+        "at ms", "took ms", "live MB", "peak MB"
+    );
+    for &(step, at, heap) in steps.iter() {
+        let (live, peak) = heap.map_or((String::from("-"), String::from("-")), |(l, p)| {
+            (format!("{:.1}", mb(l)), format!("{:.1}", mb(p)))
+        });
         eprintln!(
-            "[startup] {:9.1} {:9.1}  {}",
+            "[startup] {:9.1} {:9.1} {:>9} {:>9}  {}",
             ms(at - start),
             ms(at - previous),
+            live,
+            peak,
             step
         );
         previous = at;

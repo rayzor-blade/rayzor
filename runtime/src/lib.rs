@@ -280,7 +280,7 @@ const TRACKED_MAX_SIZE: usize = 1 << 40;
 #[cfg(feature = "profile")]
 pub mod profile;
 #[cfg(feature = "profile")]
-pub use profile::{TrackingAllocator, ensure_alloc_dump_hooks};
+pub use profile::{TrackingAllocator, ensure_alloc_dump_hooks, live_bytes, take_window_peak};
 
 /// Allocate tracked heap memory using Rust's global allocator.
 ///
