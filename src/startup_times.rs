@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 static START: OnceLock<Instant> = OnceLock::new();
 /// Each step's end, with the live heap and the step's peak when tracked.
-static STEPS: Mutex<Vec<(&'static str, Instant, Option<(u64, u64)>)>> = Mutex::new(Vec::new());
+/// A step's name, when it finished, and the heap then (profile builds only).
+type Step = (&'static str, Instant, Option<(u64, u64)>);
+
+static STEPS: Mutex<Vec<Step>> = Mutex::new(Vec::new());
 
 fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
