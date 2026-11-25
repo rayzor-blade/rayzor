@@ -552,6 +552,7 @@ enum StringKey<'a> {
 fn box_int(value: i64) -> *mut u8 {
     let val_ptr = Box::into_raw(Box::new(value)) as *mut u8;
     let dv = DynamicValue {
+        pad: 0,
         type_id: TYPE_INT,
         value_ptr: val_ptr,
     };
@@ -562,6 +563,7 @@ fn box_int(value: i64) -> *mut u8 {
 fn box_float(value: f64) -> *mut u8 {
     let val_ptr = Box::into_raw(Box::new(value)) as *mut u8;
     let dv = DynamicValue {
+        pad: 0,
         type_id: TYPE_FLOAT,
         value_ptr: val_ptr,
     };
@@ -572,6 +574,7 @@ fn box_float(value: f64) -> *mut u8 {
 fn box_bool(value: bool) -> *mut u8 {
     let val_ptr = Box::into_raw(Box::new(value as i64)) as *mut u8;
     let dv = DynamicValue {
+        pad: 0,
         type_id: TYPE_BOOL,
         value_ptr: val_ptr,
     };
@@ -588,6 +591,7 @@ fn box_string_from_bytes(bytes: &[u8]) -> *mut u8 {
     let sp = crate::haxe_string::boxed_string(bytes.to_vec()) as *mut u8;
 
     let dv = DynamicValue {
+        pad: 0,
         type_id: TYPE_STRING,
         value_ptr: sp,
     };
@@ -596,6 +600,7 @@ fn box_string_from_bytes(bytes: &[u8]) -> *mut u8 {
 
 fn box_anon(anon_handle: *mut u8) -> *mut u8 {
     let dv = DynamicValue {
+        pad: 0,
         type_id: anon_object::TYPE_ANON_OBJECT,
         value_ptr: anon_handle,
     };
@@ -604,6 +609,7 @@ fn box_anon(anon_handle: *mut u8) -> *mut u8 {
 
 fn box_array(arr_ptr: *mut u8) -> *mut u8 {
     let dv = DynamicValue {
+        pad: 0,
         type_id: TYPE_ARRAY,
         value_ptr: arr_ptr,
     };

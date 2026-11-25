@@ -272,6 +272,9 @@ impl ValueTag {
 #[derive(Debug, Clone, Copy)]
 pub struct DynamicValue {
     pub type_id: TypeId,
+    /// Zero or one of the box marks: what tells a box from an object whose
+    /// first word is a pointer with small low bits.
+    pub pad: u32,
     pub value_ptr: *mut u8,
 }
 
@@ -324,6 +327,13 @@ pub(crate) fn dynamic_box_at(p: *mut u8) -> Option<DynamicValue> {
         return None;
     }
     Some(unsafe { *(p as *const DynamicValue) })
+}
+
+/// Whether `p`, readable, carries a box's second word. Every box writes it; an
+/// object led by a pointer, such as a string, has the pointer's high half there.
+pub(crate) fn has_box_word(p: *const u8) -> bool {
+    let second = unsafe { *(p as *const u32).add(1) };
+    matches!(second, 0 | REFERENCE_BOX_MARK | ERASED_BOX_MARK)
 }
 
 /// Function pointer type for toString implementations
@@ -3013,6 +3023,7 @@ pub extern "C" fn haxe_box_int(value: i64) -> DynamicValue {
         let ptr = libc::malloc(std::mem::size_of::<i64>()) as *mut i64;
         *ptr = value;
         DynamicValue {
+            pad: 0,
             type_id: TYPE_INT,
             value_ptr: ptr as *mut u8,
         }
@@ -3026,6 +3037,7 @@ pub extern "C" fn haxe_box_float(value: f64) -> DynamicValue {
         let ptr = libc::malloc(std::mem::size_of::<f64>()) as *mut f64;
         *ptr = value;
         DynamicValue {
+            pad: 0,
             type_id: TYPE_FLOAT,
             value_ptr: ptr as *mut u8,
         }
@@ -3039,6 +3051,7 @@ pub extern "C" fn haxe_box_bool(value: bool) -> DynamicValue {
         let ptr = libc::malloc(std::mem::size_of::<bool>()) as *mut bool;
         *ptr = value;
         DynamicValue {
+            pad: 0,
             type_id: TYPE_BOOL,
             value_ptr: ptr as *mut u8,
         }
@@ -3055,6 +3068,7 @@ pub extern "C" fn haxe_box_string(str_ptr: *const u8, len: usize) -> DynamicValu
         let ptr = libc::malloc(std::mem::size_of::<HaxeString>()) as *mut HaxeString;
         ptr.write(HaxeString::from_parts(str_ptr as *mut u8, len, 0));
         DynamicValue {
+            pad: 0,
             type_id: TYPE_STRING,
             value_ptr: ptr as *mut u8,
         }
@@ -3065,6 +3079,7 @@ pub extern "C" fn haxe_box_string(str_ptr: *const u8, len: usize) -> DynamicValu
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_null() -> DynamicValue {
     DynamicValue {
+        pad: 0,
         type_id: TYPE_NULL,
         value_ptr: std::ptr::null_mut(),
     }
@@ -3882,6 +3897,7 @@ pub extern "C" fn haxe_box_haxestring_ptr(hs_ptr: *mut u8) -> *mut u8 {
         return Box::into_raw(boxed) as *mut u8;
     }
     let dynamic = DynamicValue {
+        pad: 0,
         type_id: TYPE_STRING,
         value_ptr: hs_ptr,
     };
@@ -3900,6 +3916,7 @@ pub extern "C" fn haxe_box_function_ptr(fn_ptr: *mut u8) -> *mut u8 {
         return Box::into_raw(boxed) as *mut u8;
     }
     let dynamic = DynamicValue {
+        pad: 0,
         type_id: TYPE_FUNCTION,
         value_ptr: fn_ptr,
     };
@@ -4618,6 +4635,7 @@ pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
                 return Box::into_raw(boxed) as *mut u8;
             }
             let dynamic = DynamicValue {
+                pad: 0,
                 type_id: TYPE_STRING,
                 value_ptr: value as *mut u8,
             };
@@ -4751,6 +4769,7 @@ pub(crate) fn class_box_instance(obj: *mut u8) -> Option<*mut u8> {
 #[unsafe(no_mangle)]
 pub extern "C" fn haxe_box_reference_ptr(value_ptr: *mut u8, type_id: u32) -> *mut u8 {
     let dynamic = DynamicValue {
+        pad: 0,
         type_id: TypeId(type_id),
         value_ptr,
     };
@@ -6498,5 +6517,47 @@ mod null_int_tests {
         assert_eq!(haxe_null_int_from_dynamic(haxe_box_float_ptr(2.5)), 2);
         assert_eq!(haxe_null_int_from_dynamic(haxe_box_bool_ptr(true)), 1);
         assert_eq!(haxe_null_int_from_dynamic(7usize as *mut u8), 7);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod box_recognition_tests {
+    use super::*;
+
+    /// A string whose bytes start on a 4 GiB boundary has a first word with
+    /// zero low bits, the void tag, and is still a string.
+    #[test]
+    fn a_string_at_a_4gib_boundary_is_not_a_box() {
+        const PAGE: usize = 4096;
+        let page = (0x11usize..0x40)
+            .map(|high| high << 32)
+            .map(|at| unsafe {
+                libc::mmap(
+                    at as *mut libc::c_void,
+                    PAGE,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANON,
+                    -1,
+                    0,
+                )
+            })
+            .find(|p| *p as usize & 0xffff_ffff == 0 && !p.is_null());
+        // The kernel may honour none of the hints.
+        let Some(page) = page else { return };
+        unsafe { std::ptr::copy_nonoverlapping(b"hello".as_ptr(), page.cast(), 5) };
+        let s = crate::haxe_sys::haxe_string_literal(page.cast(), 5);
+        assert!(!has_box_word(s.cast()));
+    }
+
+    #[test]
+    fn a_box_is_recognised_in_memory_that_held_other_bytes() {
+        for value in 0..64 {
+            let junk = Box::into_raw(Box::new([!0u64; 2]));
+            drop(unsafe { Box::from_raw(junk) });
+            let boxed = box_int_heap(value);
+            let d = dynamic_box_at(boxed).expect("an Int box");
+            assert_eq!(d.type_id, TYPE_INT);
+            assert!(has_box_word(boxed));
+        }
     }
 }

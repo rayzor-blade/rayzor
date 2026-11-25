@@ -896,6 +896,7 @@ mod tests {
         let handle = rayzor_anon_new(DYNAMIC_SHAPE, 0);
         let payload = 0xffffffffffffff00u64;
         let value = DynamicValue {
+            pad: 0,
             type_id: TYPE_BOOL,
             value_ptr: (&payload as *const u64).cast_mut().cast(),
         };

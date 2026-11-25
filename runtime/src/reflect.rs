@@ -1621,6 +1621,7 @@ mod tests {
         crate::haxe_string::haxe_string_from_bytes(hs.as_mut(), b"x".as_ptr(), 1);
         let s = Box::into_raw(hs) as *mut u8;
         let dv = Box::into_raw(Box::new(DynamicValue {
+            pad: 0,
             type_id: TYPE_STRING,
             value_ptr: s,
         })) as *mut u8;
@@ -1636,6 +1637,7 @@ mod tests {
     #[test]
     fn test_typeof_unknown_is_tunknown() {
         let fake = Box::into_raw(Box::new(DynamicValue {
+            pad: 0,
             type_id: crate::type_system::TypeId(999),
             value_ptr: std::ptr::null_mut(),
         })) as *mut u8;
@@ -1665,6 +1667,7 @@ mod tests {
         );
 
         let dv = Box::into_raw(Box::new(DynamicValue {
+            pad: 0,
             type_id: crate::type_system::TypeId(4242),
             value_ptr: std::ptr::null_mut(),
         })) as *mut u8;

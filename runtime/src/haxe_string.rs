@@ -1013,16 +1013,17 @@ pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
 /// `HaxeString` dereferences its type tag as a data pointer, which is why
 /// `Sys.println(42)` segfaulted while `Sys.println("x=" + 42)` worked.
 ///
-/// Discriminating is safe because the two layouts differ in their first eight
-/// bytes: `DynamicValue` starts with a small `type_id` (0..=7 for the builtin
-/// scalars), while `HaxeString` starts with a heap pointer whose low 32 bits
-/// are never that small. A tag outside that window is left alone and treated as
-/// a string, so boxed user objects behave exactly as before.
+/// The two layouts differ in their first eight bytes: `DynamicValue` starts
+/// with a small `type_id` (0..=7 for the builtin scalars) and a word that is
+/// zero or a box mark, `HaxeString` with a data pointer. The pointer's low half
+/// is small when the bytes start on a 4 GiB boundary, so the second word decides.
+/// A tag outside that window is left alone and treated as a string, so boxed
+/// user objects behave exactly as before.
 ///
 /// Returns an owned HaxeString when `s` was a boxed scalar, else None.
 unsafe fn dynamic_box_to_string(s: *const HaxeString) -> Option<*mut HaxeString> {
     crate::type_system::dynamic_box_at(s as *mut u8)
-        .filter(|d| d.tag_is_builtin())
+        .filter(|d| d.tag_is_builtin() && crate::type_system::has_box_word(s as *const u8))
         .map(|_| crate::type_system::haxe_std_string_ptr(s as *mut u8))
 }
 
