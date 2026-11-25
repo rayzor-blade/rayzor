@@ -6164,12 +6164,12 @@ mod value_tag_tests {
         for value in [12.5_f64, 7.5, 0.0, -0.0] {
             let bits = value.to_bits() as i64;
             assert_eq!(haxe_adapt_generic_value(bits, float, float, 0), bits);
-            let boxed = haxe_adapt_generic_value(bits, float, dynamic, 0);
+            let boxed = heap_float_box(value) as i64;
             assert_eq!(haxe_adapt_generic_value(boxed, dynamic, float, 0), bits);
             assert_eq!(haxe_adapt_generic_value(boxed, dynamic, dynamic, 0), boxed);
         }
-        let left = haxe_adapt_generic_value(0.0_f64.to_bits() as i64, float, dynamic, 0);
-        let right = haxe_adapt_generic_value((-0.0_f64).to_bits() as i64, float, dynamic, 0);
+        let left = heap_float_box(0.0) as i64;
+        let right = heap_float_box(-0.0) as i64;
         assert_eq!(
             crate::reflect::haxe_reflect_compare_typed(left, right, dynamic),
             0
@@ -6213,7 +6213,7 @@ mod value_tag_tests {
 
     #[test]
     fn erased_return_opens_scalar_and_reference_boxes() {
-        assert_eq!(haxe_unbox_erased_return(haxe_box_int_ptr(-7)), -7);
+        assert_eq!(haxe_unbox_erased_return(box_int_heap(-7)), -7);
         for value in [1, 0x1_ffff_ffff, -0x8000_0001] {
             assert_eq!(haxe_unbox_erased_return(haxe_box_int64_ptr(value)), value);
         }
@@ -6235,7 +6235,7 @@ mod value_tag_tests {
         assert_eq!(haxe_unbox_int_ptr(native_pointer), 0x1_ffff_ffff);
         assert_eq!(haxe_unbox_erased_return(haxe_box_bool_ptr(true)), 1);
         assert_eq!(
-            haxe_unbox_erased_return(haxe_box_float_ptr(1.5)),
+            haxe_unbox_erased_return(heap_float_box(1.5)),
             1.5f64.to_bits() as i64
         );
         let mut object = [0x1234_5678i64, 99];
@@ -6262,7 +6262,7 @@ mod value_tag_tests {
 
     #[test]
     fn generic_dynamic_returns_keep_their_boxes() {
-        let boxed = haxe_box_float_ptr(1.5);
+        let boxed = heap_float_box(1.5);
         assert_eq!(
             haxe_unbox_generic_return(boxed, ValueTag::Dynamic as i32),
             boxed as i64
@@ -6439,6 +6439,13 @@ mod channel_unbox_tests {
     }
 }
 
+/// A Float in a heap box: what a foreign producer hands over, whatever the
+/// build's own representation of a Dynamic Float.
+#[cfg(test)]
+fn heap_float_box(value: f64) -> *mut u8 {
+    Box::into_raw(Box::new(haxe_box_float(value))) as *mut u8
+}
+
 #[cfg(test)]
 mod null_int_tests {
     use super::*;
@@ -6514,7 +6521,7 @@ mod null_int_tests {
 
     #[test]
     fn foreign_boxes_and_raw_scalars_read_as_int() {
-        assert_eq!(haxe_null_int_from_dynamic(haxe_box_float_ptr(2.5)), 2);
+        assert_eq!(haxe_null_int_from_dynamic(heap_float_box(2.5)), 2);
         assert_eq!(haxe_null_int_from_dynamic(haxe_box_bool_ptr(true)), 1);
         assert_eq!(haxe_null_int_from_dynamic(7usize as *mut u8), 7);
     }
