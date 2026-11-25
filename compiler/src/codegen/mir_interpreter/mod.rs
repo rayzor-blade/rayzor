@@ -184,6 +184,8 @@ pub(crate) struct Program {
     /// Loops that carried on in compiled code.
     transfers: std::sync::atomic::AtomicU64,
     literals: Mutex<HashMap<String, &'static [u8]>>,
+    /// `haxe_string_literal`, which every `Op::Str` calls.
+    pub(crate) literal_fn: std::sync::OnceLock<usize>,
     cache: AtomicBool,
 }
 
@@ -208,6 +210,7 @@ impl Program {
             compile_request: std::sync::OnceLock::new(),
             transfers: std::sync::atomic::AtomicU64::new(0),
             literals: Mutex::new(HashMap::new()),
+            literal_fn: std::sync::OnceLock::new(),
             cache: AtomicBool::new(true),
         }
     }

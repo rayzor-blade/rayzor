@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use crate::ir::{AtomicRmwOp, IrBlockId, IrFunctionId};
 
 use super::decode::{
-    Block, Call, Edge, FloatCc, FloatOp, FnRef, Function, GlobalSlot, IndirectCall, IntCc, IntOp,
-    Intrinsic, Mt, Op, Reg, Src, Target, Term, canon, float, float_bits, sext,
+    Block, Call, ClosureOp, Edge, FloatCc, FloatOp, FnRef, Function, GlobalSlot, IndirectCall,
+    IntCc, IntOp, Intrinsic, Mt, Op, Reg, Src, Target, Term, canon, float, float_bits, sext,
 };
 use super::native::{self, Ret};
 use super::{InterpError, Machine, trampoline};
@@ -995,13 +995,13 @@ fn call_indirect(
 fn cold(m: &Machine, fr: &mut Frame, op: &Op) -> Result<(), InterpError> {
     let r = &mut fr.regs;
     match op {
-        Op::Str {
-            dest,
-            literal,
-            ptr,
-            len,
-        } => {
-            let make: extern "C" fn(usize, usize) -> u64 = unsafe { std::mem::transmute(*literal) };
+        Op::Str { dest, ptr, len } => {
+            let literal = *m
+                .program
+                .literal_fn
+                .get()
+                .ok_or_else(|| null_fault("unresolved extern `haxe_string_literal`"))?;
+            let make: extern "C" fn(usize, usize) -> u64 = unsafe { std::mem::transmute(literal) };
             r[*dest as usize] = make(*ptr, *len);
         }
         Op::Fma {
@@ -1078,7 +1078,11 @@ fn cold(m: &Machine, fr: &mut Frame, op: &Op) -> Result<(), InterpError> {
         Op::GlobalLoad { dest, mt, slot } => {
             let word = match *slot {
                 GlobalSlot::Address(a) => unsafe { (a as *const u64).read() },
-                GlobalSlot::Runtime { id, load, .. } => {
+                GlobalSlot::Runtime { id } => {
+                    let load = m
+                        .program
+                        .symbol("rayzor_global_load")
+                        .ok_or_else(|| null_fault("no runtime global store"))?;
                     let load: extern "C" fn(i64) -> u64 = unsafe { std::mem::transmute(load) };
                     load(i64::from(id))
                 }
@@ -1089,7 +1093,11 @@ fn cold(m: &Machine, fr: &mut Frame, op: &Op) -> Result<(), InterpError> {
             let word = canon(r[*src as usize], *mt);
             match *slot {
                 GlobalSlot::Address(a) => unsafe { (a as *mut u64).write(word) },
-                GlobalSlot::Runtime { id, store, .. } => {
+                GlobalSlot::Runtime { id } => {
+                    let store = m
+                        .program
+                        .symbol("rayzor_global_store")
+                        .ok_or_else(|| null_fault("no runtime global store"))?;
                     let store: extern "C" fn(i64, u64) = unsafe { std::mem::transmute(store) };
                     store(i64::from(id), word);
                 }
@@ -1098,11 +1106,12 @@ fn cold(m: &Machine, fr: &mut Frame, op: &Op) -> Result<(), InterpError> {
         Op::FnAddr { dest, module, func } => {
             r[*dest as usize] = m.function_address(*module, *func)? as u64;
         }
-        Op::Closure {
-            dest,
-            func,
-            captures,
-        } => {
+        Op::Closure(c) => {
+            let ClosureOp {
+                dest,
+                func,
+                captures,
+            } = c.as_ref();
             let code = match func {
                 FnRef::Address(a) => *a as u64,
                 FnRef::Function { module, func } => m.function_address(*module, *func)? as u64,

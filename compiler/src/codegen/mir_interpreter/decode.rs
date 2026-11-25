@@ -319,9 +319,9 @@ pub(crate) enum Op {
         conv: Conv,
     },
     /// `haxe_string_literal(ptr, len)` on bytes that live for the process.
+    /// A string literal, made by `haxe_string_literal` (`Program::literal_fn`).
     Str {
         dest: Reg,
-        literal: usize,
         ptr: usize,
         len: usize,
     },
@@ -449,11 +449,8 @@ pub(crate) enum Op {
         func: IrFunctionId,
     },
     /// A heap closure object `{fn, env}`, as `FunctionRef` and `MakeClosure` build.
-    Closure {
-        dest: Reg,
-        func: FnRef,
-        captures: Vec<(Reg, Mt)>,
-    },
+    /// Boxed: the largest payload, and a rare op, would size every other.
+    Closure(Box<ClosureOp>),
     Env {
         dest: Reg,
     },
@@ -524,12 +521,22 @@ pub(crate) enum Op {
     },
 }
 
+// Every decoded instruction is one of these; a large variant sizes them all.
+const _: () = assert!(std::mem::size_of::<Op>() <= 32);
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum GlobalSlot {
     /// The runtime's slot for this global, read and written in place.
     Address(usize),
     /// Through `rayzor_global_load` / `rayzor_global_store`.
-    Runtime { id: u32, load: usize, store: usize },
+    Runtime { id: u32 },
+}
+
+#[derive(Debug)]
+pub(crate) struct ClosureOp {
+    pub dest: Reg,
+    pub func: FnRef,
+    pub captures: Vec<(Reg, Mt)>,
 }
 
 #[derive(Clone, Debug)]
@@ -957,6 +964,7 @@ pub(crate) fn decode(
             d.instruction(inst, &mut ops);
         }
         let term = d.terminator(*id, &block.terminator, &mut ops);
+        ops.shrink_to_fit();
         blocks.push(Block { ops, term });
     }
 
@@ -1611,11 +1619,11 @@ impl Decoder<'_> {
             I::FunctionRef { dest, func_id } => {
                 let func = self.fn_ref(*func_id)?;
                 self.set_mt(dest.as_u32(), Mt::I64);
-                ops.push(Op::Closure {
+                ops.push(Op::Closure(Box::new(ClosureOp {
                     dest: dest.as_u32(),
                     func,
                     captures: Vec::new(),
-                });
+                })));
             }
 
             I::MakeClosure {
@@ -1636,11 +1644,11 @@ impl Decoder<'_> {
                     captures.push((r, self.mt_of(r)));
                 }
                 self.set_mt(dest.as_u32(), Mt::I64);
-                ops.push(Op::Closure {
+                ops.push(Op::Closure(Box::new(ClosureOp {
                     dest: dest.as_u32(),
                     func,
                     captures,
-                });
+                })));
             }
 
             I::ClosureEnv { dest, .. } => {
@@ -1811,11 +1819,11 @@ impl Decoder<'_> {
                     .externs
                     .symbol("haxe_string_literal")
                     .ok_or("unresolved extern `haxe_string_literal`")?;
+                let _ = self.externs.program.literal_fn.set(literal);
                 let bytes = self.externs.program.literal(s);
                 self.set_mt(dest, Mt::I64);
                 ops.push(Op::Str {
                     dest,
-                    literal,
                     ptr: bytes.as_ptr() as usize,
                     len: bytes.len(),
                 });
@@ -1872,7 +1880,7 @@ impl Decoder<'_> {
             self.externs.symbol("rayzor_global_load"),
             self.externs.symbol("rayzor_global_store"),
         ) {
-            (Some(load), Some(store)) => Ok(GlobalSlot::Runtime { id, load, store }),
+            (Some(_), Some(_)) => Ok(GlobalSlot::Runtime { id }),
             _ => Err("no runtime global store".to_string()),
         }
     }
