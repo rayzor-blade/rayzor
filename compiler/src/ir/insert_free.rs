@@ -647,6 +647,71 @@ impl Drop for FreeGraphFlush {
     }
 }
 
+/// Whether a register could hold an address.
+fn may_hold_address(function: &IrFunction, reg: IrId) -> bool {
+    !matches!(
+        function.register_types.get(&reg),
+        Some(
+            IrType::Bool
+                | IrType::I8
+                | IrType::I16
+                | IrType::I32
+                | IrType::U8
+                | IrType::U16
+                | IrType::U32
+                | IrType::F32
+                | IrType::F64
+                | IrType::Void
+        )
+    )
+}
+
+/// Addresses read out of an allocation that owns storage (an array's buffer, a
+/// string's bytes), and what is computed from them. Releasing the allocation
+/// releases that storage too, so a read through one of these is a read of the
+/// allocation, though its own name is not used.
+fn interior_of(derived: &BTreeSet<IrId>, function: &IrFunction) -> BTreeSet<IrId> {
+    let mut interior: BTreeSet<IrId> = BTreeSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in function.cfg.blocks.values() {
+            for inst in &block.instructions {
+                let (dest, from) = match inst {
+                    IrInstruction::ArrayHeader {
+                        dest, array, field, ..
+                    } if derived.contains(array) => {
+                        (*dest, *field == super::instructions::ArrayField::Data)
+                    }
+                    IrInstruction::Load { dest, ptr, .. } if derived.contains(ptr) => (*dest, true),
+                    IrInstruction::GetElementPtr { dest, .. }
+                    | IrInstruction::PtrAdd { dest, .. }
+                    | IrInstruction::Cast { dest, .. }
+                    | IrInstruction::BitCast { dest, .. }
+                    | IrInstruction::SsaBarrier { dest, .. }
+                    | IrInstruction::Copy { dest, .. }
+                    | IrInstruction::Select { dest, .. }
+                    | IrInstruction::BinOp { dest, .. } => {
+                        (*dest, inst.uses().iter().any(|u| interior.contains(u)))
+                    }
+                    _ => continue,
+                };
+                if from && may_hold_address(function, dest) && interior.insert(dest) {
+                    changed = true;
+                }
+            }
+            for phi in &block.phi_nodes {
+                if phi.incoming.iter().any(|(_, v)| interior.contains(v))
+                    && interior.insert(phi.dest)
+                {
+                    changed = true;
+                }
+            }
+        }
+    }
+    interior
+}
+
 fn release_call(func_id: IrFunctionId, value: IrId) -> IrInstruction {
     IrInstruction::CallDirect {
         dest: None,
@@ -684,8 +749,10 @@ fn block_reads(block: &super::blocks::IrBasicBlock, values: &BTreeSet<IrId>) -> 
 /// throw may skip it and leak), is not read by its own terminator, reaches no
 /// further read, and cannot run twice before the definition does. No phi may
 /// carry the value: a merge gives it a second name this walk does not follow.
+/// A read through `interior` counts as a read of the value.
 fn region_release(
     derived: &BTreeSet<IrId>,
+    interior: &BTreeSet<IrId>,
     def_block: IrBlockId,
     function: &IrFunction,
     domtree: &crate::ir::loop_analysis::DominatorTree,
@@ -698,6 +765,16 @@ fn region_release(
     }) {
         return None;
     }
+    // An interior address the defining block's own phi carries in is from the
+    // definition's previous run.
+    if blocks.get(&def_block).is_some_and(|b| {
+        b.phi_nodes
+            .iter()
+            .any(|phi| phi.incoming.iter().any(|(_, v)| interior.contains(v)))
+    }) {
+        return None;
+    }
+    let watched: BTreeSet<IrId> = derived.union(interior).copied().collect();
     // Region: blocks reached from the definition without running it again.
     let mut region: Vec<IrBlockId> = Vec::new();
     let mut in_region: BTreeSet<IrBlockId> = BTreeSet::new();
@@ -761,7 +838,7 @@ fn region_release(
     }
     let reads: BTreeMap<IrBlockId, (bool, bool)> = region
         .iter()
-        .map(|&b| (b, block_reads(&blocks[&b], derived)))
+        .map(|&b| (b, block_reads(&blocks[&b], &watched)))
         .collect();
     // Nearest post-dominator first: the one with the most post-dominators.
     let mut candidates: Vec<IrBlockId> = pdom[&def_block]
@@ -854,6 +931,9 @@ fn insert_free_for_function(
     if function.cfg.blocks.is_empty() {
         return 0;
     }
+    // Dominance reads the predecessor lists, which earlier passes may have left
+    // behind the CFG.
+    function.cfg.recompute_predecessors();
 
     // Step 1: Find all allocation sources:
     // - malloc + reflective class allocators (`haxe_type_create_*`)
@@ -1113,6 +1193,23 @@ fn insert_free_for_function(
         .map(|&id| (id, build_derived_set(id, function)))
         .collect();
 
+    // Only a release that takes storage with it has interior addresses to watch.
+    let interior_sets: BTreeMap<IrId, BTreeSet<IrId>> = allocs_needing_free
+        .iter()
+        .map(|&id| {
+            let owns_storage = string_alloc_ids.contains(&id)
+                || array_alloc_ids.contains(&id)
+                || anon_alloc_ids.contains(&id)
+                || boxed_alloc.contains_key(&id);
+            let interior = if owns_storage {
+                interior_of(&derived_sets[&id], function)
+            } else {
+                BTreeSet::new()
+            };
+            (id, interior)
+        })
+        .collect();
+
     // Pick a single anon_drop function ID for emitting drop calls
     let anon_drop_id = ids.anon_drop_ids.iter().next().cloned();
     // ...and a single haxe_array_free ID for releasing array data buffers.
@@ -1302,7 +1399,10 @@ fn insert_free_for_function(
             continue;
         };
         let derived = &derived_sets[&alloc_id];
-        if !array_confined_to_block(derived, def_block, function) {
+        let interior = &interior_sets[&alloc_id];
+        if !array_confined_to_block(derived, def_block, function)
+            || !array_confined_to_block(interior, def_block, function)
+        {
             let plain_instance = !is_string
                 && !array_alloc_ids.contains(&alloc_id)
                 && !anon_alloc_ids.contains(&alloc_id)
@@ -1385,9 +1485,13 @@ fn insert_free_for_function(
         .flat_map(|(_, _, carried)| carried.iter().copied())
         .collect();
     let needing_free_set: BTreeSet<IrId> = allocs_needing_free.iter().copied().collect();
-    for (latch, alloc_id) in
-        find_iteration_temporaries(function, &needing_free_set, &temp_handled, &derived_sets)
-    {
+    for (latch, alloc_id) in find_iteration_temporaries(
+        function,
+        &needing_free_set,
+        &temp_handled,
+        &derived_sets,
+        &interior_sets,
+    ) {
         if already_released(
             function,
             alloc_id,
@@ -1501,8 +1605,14 @@ fn insert_free_for_function(
         };
         let domtree = domtree
             .get_or_insert_with(|| crate::ir::loop_analysis::DominatorTree::compute(function));
-        let Some(at) = region_release(&derived_sets[&alloc_id], def_block, function, domtree)
-        else {
+        let at = region_release(
+            &derived_sets[&alloc_id],
+            &interior_sets[&alloc_id],
+            def_block,
+            function,
+            domtree,
+        );
+        let Some(at) = at else {
             continue;
         };
         let insts: Vec<IrInstruction> = if string_alloc_ids.contains(&alloc_id) {
@@ -2230,6 +2340,7 @@ fn find_iteration_temporaries(
     needing_free: &BTreeSet<IrId>,
     handled: &BTreeSet<IrId>,
     derived_sets: &BTreeMap<IrId, BTreeSet<IrId>>,
+    interior_sets: &BTreeMap<IrId, BTreeSet<IrId>>,
 ) -> Vec<(IrBlockId, IrId)> {
     let mut out: Vec<(IrBlockId, IrId)> = Vec::new();
     if needing_free.is_empty() {
@@ -2237,6 +2348,7 @@ fn find_iteration_temporaries(
     }
     let domtree = crate::ir::loop_analysis::DominatorTree::compute(function);
     let loop_info = crate::ir::loop_analysis::LoopNestInfo::analyze(function, &domtree);
+    let no_interior = BTreeSet::new();
 
     for natural in loop_info.loops_by_depth() {
         let latch = natural.back_edge_source;
@@ -2288,6 +2400,28 @@ fn find_iteration_temporaries(
                 }
             }
             if escapes_iteration {
+                continue;
+            }
+            // An address inside it must not be read outside the loop, nor
+            // carried to the next iteration.
+            let interior = interior_sets.get(&alloc_id).unwrap_or(&no_interior);
+            let outside = function
+                .cfg
+                .blocks
+                .iter()
+                .filter(|(bid, _)| !natural.blocks.contains(bid))
+                .any(|(_, block)| {
+                    let (body, term) = block_reads(block, interior);
+                    body || term
+                });
+            let carried = function.cfg.blocks.get(&natural.header).is_some_and(|b| {
+                b.phi_nodes.iter().any(|p| {
+                    p.incoming
+                        .iter()
+                        .any(|(from, v)| *from == latch && interior.contains(v))
+                })
+            });
+            if outside || carried {
                 continue;
             }
             out.push((latch, alloc_id));
@@ -4968,4 +5102,179 @@ fn owner_loads_confined(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod interior_tests {
+    use super::super::instructions::ArrayField;
+    use super::super::{BinaryOp, IrFunctionSignature};
+    use super::*;
+    use crate::ir::loop_analysis::DominatorTree;
+
+    fn function() -> IrFunction {
+        IrFunction::new(
+            IrFunctionId(1),
+            crate::tast::SymbolId::from_raw(1),
+            "f".to_string(),
+            IrFunctionSignature {
+                parameters: vec![],
+                return_type: IrType::Void,
+                calling_convention: super::super::CallingConvention::Haxe,
+                can_throw: false,
+                type_params: vec![],
+                uses_sret: false,
+            },
+        )
+    }
+
+    fn block(f: &mut IrFunction, id: u32, instructions: Vec<IrInstruction>, to: IrTerminator) {
+        let id = IrBlockId(id);
+        if !f.cfg.blocks.contains_key(&id) {
+            f.cfg
+                .blocks
+                .insert(id, super::super::blocks::IrBasicBlock::new(id));
+        }
+        let b = f.cfg.blocks.get_mut(&id).unwrap();
+        b.instructions = instructions;
+        b.terminator = to;
+    }
+
+    fn go(to: u32) -> IrTerminator {
+        IrTerminator::Branch {
+            target: IrBlockId(to),
+        }
+    }
+
+    fn fork(a: u32, b: u32) -> IrTerminator {
+        IrTerminator::CondBranch {
+            condition: IrId(90),
+            true_target: IrBlockId(a),
+            false_target: IrBlockId(b),
+        }
+    }
+
+    /// An array made in block 1, its data address loaded there, a straight
+    /// block 2, a loop 3 <-> 4 reading through the address, and block 5 after.
+    fn array_read_in_a_loop() -> (IrFunction, BTreeSet<IrId>) {
+        let array = IrId(10);
+        let data = IrId(11);
+        let mut f = function();
+        f.register_types
+            .insert(data, IrType::Ptr(Box::new(IrType::U8)));
+        block(&mut f, 0, vec![], fork(1, 6));
+        block(
+            &mut f,
+            1,
+            vec![
+                IrInstruction::CallDirect {
+                    dest: Some(array),
+                    func_id: IrFunctionId(7),
+                    args: vec![],
+                    arg_ownership: vec![],
+                    type_args: vec![],
+                    is_tail_call: false,
+                },
+                IrInstruction::ArrayHeader {
+                    dest: data,
+                    array,
+                    field: ArrayField::Data,
+                    guarded: false,
+                },
+            ],
+            go(2),
+        );
+        block(&mut f, 2, vec![], go(3));
+        block(&mut f, 3, vec![], fork(4, 5));
+        block(
+            &mut f,
+            4,
+            vec![IrInstruction::Load {
+                dest: IrId(12),
+                ptr: data,
+                ty: IrType::F64,
+            }],
+            go(3),
+        );
+        block(&mut f, 5, vec![], go(6));
+        block(&mut f, 6, vec![], IrTerminator::Return { value: None });
+        f.cfg.recompute_predecessors();
+        (f, BTreeSet::from([array]))
+    }
+
+    #[test]
+    fn a_release_waits_for_reads_through_the_data_address() {
+        let (f, derived) = array_read_in_a_loop();
+        let domtree = DominatorTree::compute(&f);
+        let def = IrBlockId(1);
+        let interior = interior_of(&derived, &f);
+        assert_eq!(interior, BTreeSet::from([IrId(11)]));
+        // Judged by the array's own name alone, block 2 looks free to release.
+        assert_eq!(
+            region_release(&derived, &BTreeSet::new(), def, &f, &domtree),
+            Some(IrBlockId(2))
+        );
+        assert_eq!(
+            region_release(&derived, &interior, def, &f, &domtree),
+            Some(IrBlockId(5))
+        );
+    }
+
+    #[test]
+    fn a_length_is_not_an_address() {
+        let (mut f, derived) = array_read_in_a_loop();
+        f.cfg.blocks.get_mut(&IrBlockId(1)).unwrap().instructions[1] = IrInstruction::ArrayHeader {
+            dest: IrId(11),
+            array: IrId(10),
+            field: ArrayField::Len,
+            guarded: false,
+        };
+        assert!(interior_of(&derived, &f).is_empty());
+    }
+
+    #[test]
+    fn addresses_computed_from_the_data_address_count() {
+        let (mut f, derived) = array_read_in_a_loop();
+        let b = f.cfg.blocks.get_mut(&IrBlockId(2)).unwrap();
+        b.instructions.push(IrInstruction::BinOp {
+            dest: IrId(13),
+            op: BinaryOp::Add,
+            left: IrId(11),
+            right: IrId(91),
+        });
+        assert!(interior_of(&derived, &f).contains(&IrId(13)));
+    }
+
+    #[test]
+    fn an_iteration_release_waits_for_reads_outside_the_loop() {
+        // The loop 1 -> 2 -> 1 makes an array each time; block 3 reads its data.
+        let array = IrId(10);
+        let data = IrId(11);
+        let mut f = function();
+        f.register_types
+            .insert(data, IrType::Ptr(Box::new(IrType::U8)));
+        block(&mut f, 0, vec![], go(1));
+        let (body, _) = array_read_in_a_loop();
+        let make = body.cfg.blocks[&IrBlockId(1)].instructions.clone();
+        block(&mut f, 1, make, fork(2, 3));
+        block(&mut f, 2, vec![], go(1));
+        block(
+            &mut f,
+            3,
+            vec![IrInstruction::Load {
+                dest: IrId(12),
+                ptr: data,
+                ty: IrType::F64,
+            }],
+            IrTerminator::Return { value: None },
+        );
+        f.cfg.recompute_predecessors();
+        let needing = BTreeSet::from([array]);
+        let derived = BTreeMap::from([(array, BTreeSet::from([array]))]);
+        let none = BTreeMap::new();
+        let watched = BTreeMap::from([(array, interior_of(&derived[&array], &f))]);
+        let place =
+            |sets| find_iteration_temporaries(&f, &needing, &BTreeSet::new(), &derived, sets);
+        assert_eq!(place(&none), vec![(IrBlockId(2), array)]);
+        assert!(place(&watched).is_empty());
+    }
 }
