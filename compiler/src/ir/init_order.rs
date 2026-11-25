@@ -46,7 +46,7 @@ pub fn ordered_inits(module: &IrModule, name: &str) -> Vec<IrFunctionId> {
         let mut seen = BTreeSet::from([init]);
         let mut stack = vec![init];
         while let Some(id) = stack.pop() {
-            let Some(func) = module.functions.get(&id) else {
+            let Some(func) = module.full_function(id) else {
                 continue;
             };
             for block in func.cfg.blocks.values() {

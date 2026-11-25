@@ -1922,32 +1922,7 @@ impl TieredBackend {
     /// The interpreter returns void for all vector ops, so these functions
     /// must skip Tier 0 (Interpreted) and start at Baseline (Cranelift JIT).
     fn function_uses_simd(func: &IrFunction) -> bool {
-        for block in func.cfg.blocks.values() {
-            for inst in &block.instructions {
-                match inst {
-                    IrInstruction::VectorLoad { .. }
-                    | IrInstruction::VectorStore { .. }
-                    | IrInstruction::VectorBinOp { .. }
-                    | IrInstruction::VectorSplat { .. }
-                    | IrInstruction::VectorExtract { .. }
-                    | IrInstruction::VectorInsert { .. }
-                    | IrInstruction::VectorReduce { .. }
-                    | IrInstruction::VectorUnaryOp { .. }
-                    | IrInstruction::VectorMinMax { .. }
-                    | IrInstruction::VectorDot { .. }
-                    | IrInstruction::VectorShuffle { .. }
-                    | IrInstruction::VectorConvert { .. }
-                    | IrInstruction::VectorNarrow { .. }
-                    // Atomics need real shared memory → force straight to JIT.
-                    | IrInstruction::AtomicLoad { .. }
-                    | IrInstruction::AtomicStore { .. }
-                    | IrInstruction::AtomicRmw { .. }
-                    | IrInstruction::AtomicCas { .. } => return true,
-                    _ => {}
-                }
-            }
-        }
-        false
+        crate::ir::deferred::uses_simd(func)
     }
 
     /// Compile/load a MIR module
@@ -1984,9 +1959,11 @@ impl TieredBackend {
         // Functions using SIMD instructions skip the interpreter tier since
         // the interpreter returns void for all vector operations.
         for (func_id, func) in &module.functions {
-            let tier = if initial_tier == OptimizationTier::Interpreted
-                && Self::function_uses_simd(func)
-            {
+            let uses_simd = match module.deferred_facts() {
+                Some(facts) if module.body_pending(*func_id) => facts.uses_simd.contains(func_id),
+                _ => Self::function_uses_simd(func),
+            };
+            let tier = if initial_tier == OptimizationTier::Interpreted && uses_simd {
                 if self.config.verbosity >= 1 {
                     debug!(
                         "[TieredBackend] Force-promoting {:?} to Baseline (uses SIMD)",
@@ -2675,6 +2652,11 @@ impl TieredBackend {
             let working = self.modules.read().unwrap().clone();
             let interpreted = std::mem::replace(&mut *self.modules.write().unwrap(), working);
             self.retired_modules.push(interpreted);
+        }
+        // Everything below reads and compiles whole modules. Interpreted code
+        // decodes from the retired originals, so these can take their bodies.
+        for module in self.modules.write().unwrap().iter_mut() {
+            module.materialize_all();
         }
 
         // Resume points are built from the functions suspended interpreted
@@ -3491,6 +3473,9 @@ impl TieredBackend {
         let modules_lock = self.modules.read().unwrap();
         let mut modules: Vec<IrModule> = modules_lock.iter().cloned().collect();
         drop(modules_lock);
+        for module in modules.iter_mut() {
+            module.materialize_all();
+        }
 
         // Find the entry (main) function for tree-shaking
         let entry = modules
@@ -3543,7 +3528,7 @@ impl TieredBackend {
         let mut seen: std::collections::BTreeSet<IrFunctionId> = targets.iter().copied().collect();
         let mut frontier = targets.clone();
         while let Some(func_id) = frontier.pop() {
-            let Some(function) = modules.iter().find_map(|m| m.functions.get(&func_id)) else {
+            let Some(function) = modules.iter().find_map(|m| m.full_function(func_id)) else {
                 continue;
             };
             for block in function.cfg.blocks.values() {
@@ -4906,7 +4891,11 @@ impl BackgroundTierUp {
             return unit;
         }
         emit_tier_event("prepare_full_copy", roots.first().copied(), None, "");
-        self.prepare_from(live.to_vec(), live, roots, waiting, bound)
+        let mut whole = live.to_vec();
+        for module in whole.iter_mut() {
+            module.materialize_all();
+        }
+        self.prepare_from(whole, live, roots, waiting, bound)
     }
 
     /// `live` with the functions in `reached`, and any with type parameters,
@@ -4937,7 +4926,13 @@ impl BackgroundTierUp {
                     register_to_symbol,
                     external_function_names,
                     import_file_blocks,
+                    deferred,
                 } = module;
+                let wide = |id: &IrFunctionId| {
+                    module
+                        .deferred_facts()
+                        .is_some_and(|facts| facts.wide_vectors.contains(id))
+                };
                 let functions = functions
                     .iter()
                     .map(|(id, function)| {
@@ -4945,10 +4940,18 @@ impl BackgroundTierUp {
                             || function.cfg.blocks.is_empty()
                             || !function.signature.type_params.is_empty();
                         if whole {
-                            return (*id, function.clone());
+                            let full = module.full_function(*id).map(|f| f.into_owned());
+                            return (*id, full.unwrap_or_else(|| function.clone()));
                         }
                         placeholders.insert(*id);
-                        (*id, Self::placeholder_of(function))
+                        // A pending body keeps its wide-vector types in the store.
+                        let source = if module.body_pending(*id) && wide(id) {
+                            module.full_function(*id)
+                        } else {
+                            None
+                        };
+                        let source = source.as_deref().unwrap_or(function);
+                        (*id, Self::placeholder_of(source))
                     })
                     .collect();
                 IrModule {
@@ -4967,6 +4970,7 @@ impl BackgroundTierUp {
                     register_to_symbol: register_to_symbol.clone(),
                     external_function_names: external_function_names.clone(),
                     import_file_blocks: import_file_blocks.clone(),
+                    deferred: deferred.as_ref().map(|d| d.facts_only()),
                 }
             })
             .collect();
@@ -5124,11 +5128,11 @@ impl BackgroundTierUp {
                 .iter()
                 .position(|m| m as *const IrModule as usize == module)
                 .ok_or("the module it was asked from is no longer loaded")?;
-            let function = live[index]
-                .functions
-                .get(&func_id)
+            let full = live[index]
+                .full_function(func_id)
                 .filter(|f| !f.cfg.blocks.is_empty())
                 .ok_or("no body to compile")?;
+            let function: &IrFunction = &full;
             name = function
                 .qualified_name
                 .clone()
@@ -5241,7 +5245,11 @@ impl BackgroundTierUp {
         let started = std::time::Instant::now();
         let (mut work, seed) = {
             let live = self.modules.read().unwrap();
-            (live.clone(), crate::ir::abi::indirect_targets(&live))
+            let mut work = live.clone();
+            for module in work.iter_mut() {
+                module.materialize_all();
+            }
+            (work, crate::ir::abi::indirect_targets(&live))
         };
         if self.stack_traces {
             TieredBackend::instrument_modules_for_stack_traces(&mut work);
@@ -5347,7 +5355,10 @@ pub(crate) fn compile_llvm_bead(
             return Err(format!("{func_id:?} is in none of the loaded modules"));
         }
         let seed = crate::ir::abi::indirect_targets(&live);
-        let shaken: Vec<crate::ir::IrModule> = live.clone();
+        let mut shaken: Vec<crate::ir::IrModule> = live.clone();
+        for module in shaken.iter_mut() {
+            module.materialize_all();
+        }
         (shaken, seed)
     };
     // Snapshot after cloning the modules and release the lock before LLVM's

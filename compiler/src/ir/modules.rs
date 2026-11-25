@@ -57,6 +57,11 @@ pub struct IrModule {
     /// with more ids than one block owns the blocks after it.
     #[serde(default)]
     pub import_file_blocks: BTreeMap<u32, u32>,
+
+    /// Bodies still serialized, for a module loaded as a skeleton
+    /// (`ir::deferred`); `None` when every body is present.
+    #[serde(skip)]
+    pub deferred: Option<super::deferred::DeferredBodies>,
 }
 
 /// Global variable identifier
@@ -469,6 +474,7 @@ impl IrModule {
             register_to_symbol: BTreeMap::new(),
             external_function_names: BTreeMap::new(),
             import_file_blocks: BTreeMap::new(),
+            deferred: None,
         }
     }
 

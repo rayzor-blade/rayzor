@@ -273,6 +273,21 @@ fn compile_into_fresh_backend(
         );
         return Err(err);
     }
+    // A skeleton's pending bodies would compile as traps: give a copy them.
+    let whole: Vec<crate::ir::IrModule>;
+    let modules: &[crate::ir::IrModule] = if modules.iter().any(|m| m.deferred.is_some()) {
+        whole = modules
+            .iter()
+            .map(|m| {
+                let mut m = m.clone();
+                m.materialize_all();
+                m
+            })
+            .collect();
+        &whole
+    } else {
+        &modules
+    };
     for module in modules.iter() {
         if let Err(e) = backend.compile_module_without_finalize(module) {
             emit_beadie_compile_event(

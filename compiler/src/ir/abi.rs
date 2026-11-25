@@ -19,6 +19,11 @@ use crate::ir::{CallingConvention, IrFunction, IrFunctionId, IrInstruction, IrMo
 /// their own body reads it. `__vtable_init__` names its entries with direct
 /// calls, which is how they get into a vtable, so its call targets count too.
 pub fn collect_indirect_targets(module: &IrModule, into: &mut BTreeSet<IrFunctionId>) {
+    // A skeleton's bodies are not all here; the scan ran when it was written.
+    if let Some(facts) = module.deferred_facts() {
+        into.extend(facts.indirect_targets.iter().copied());
+        return;
+    }
     for function in module.functions.values() {
         for block in function.cfg.blocks.values() {
             for inst in &block.instructions {

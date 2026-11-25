@@ -1702,7 +1702,7 @@ fn run_file(
             }
         }
         let mut h = DefaultHasher::new();
-        "rayzor-run-entry-mir-cache-v2".hash(&mut h);
+        "rayzor-run-entry-mir-cache-v3".hash(&mut h);
         source.hash(&mut h);
         file.to_string_lossy().hash(&mut h);
         if let Ok(abs) = file.canonicalize() {
@@ -1807,10 +1807,8 @@ fn run_file(
                         }
                     }
                 }
-                // Load MIR module
-                if let Ok(module) =
-                    postcard::from_bytes::<compiler::ir::IrModule>(&data[12 + diag_len..])
-                {
+                // Load the MIR module's skeleton; its bodies decode on demand.
+                if let Some(module) = compiler::ir::deferred::join(&data[12 + diag_len..]) {
                     startup_times::finished("MIR cache load");
                     break 'load_mir (module, true);
                 }
@@ -2041,7 +2039,7 @@ fn run_file(
             let mut cache_data = source_hash.to_le_bytes().to_vec();
             cache_data.extend((diag_bytes.len() as u32).to_le_bytes());
             cache_data.extend(&diag_bytes);
-            if let Ok(serialized) = postcard::to_allocvec(&mir_module) {
+            if let Ok(serialized) = compiler::ir::deferred::split(&mir_module) {
                 cache_data.extend(serialized);
                 let _ = std::fs::write(&mir_cache_path, &cache_data);
             }

@@ -860,10 +860,10 @@ pub(crate) fn decode(
     func_id: IrFunctionId,
     indirect: &BTreeSet<IrFunctionId>,
 ) -> Result<Function, String> {
-    let function = module
-        .functions
-        .get(&func_id)
+    let full = module
+        .full_function(func_id)
         .ok_or_else(|| format!("function {:?} not found", func_id))?;
+    let function: &IrFunction = &full;
     if function.cfg.blocks.is_empty() {
         return Err(format!("`{}` has no body", function.name));
     }

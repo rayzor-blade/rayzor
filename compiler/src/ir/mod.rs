@@ -20,6 +20,7 @@ pub mod blade; // BLADE format - Blazing Language Artifact Deployment Environmen
 pub mod blocks;
 pub mod bounds_check_elimination; // Bounds Check Elimination for array loops
 pub mod builder;
+pub mod deferred; // Function bodies decoded from the run cache on demand
 pub mod devirtualize; // Devirtualization: indirect → direct calls
 pub mod dump; // MIR pretty-printer for debugging
 pub mod environment_layout; // Closure environment layout abstraction
@@ -49,8 +50,8 @@ pub mod scalar_replacement; // Scalar Replacement of Aggregates (SRA)
 pub mod snapshot; // Standard library lowered at build time and carried in the binary
 pub mod tail_recursion; // Self-recursion turned into loops
 pub mod tree_fusion; // Build-then-fold recursion turned into one fold
-pub mod trivial_phi;
-pub mod vec_map; // Phis that only rename one value
+pub mod trivial_phi; // Phis that only rename one value
+pub mod vec_map; // Ordered maps stored as sorted vectors
 // Shaders lower from HIR to WGSL source, which is a lowering step and not
 // code generation — it reads HIR and types, and nothing a backend provides.
 pub mod tree_shake; // Dead-code elimination for .rzb bundles
