@@ -103,6 +103,12 @@ fn stack_base() -> Option<usize> {
 /// Whether `value` is stored in any stack word between `low` and `high`
 /// outside the `opaque` ranges.
 fn on_stack(value: usize, low: usize, high: usize, opaque: &[(usize, usize)]) -> bool {
+    stack_word(value, low, high, opaque).is_some()
+}
+
+/// The address of the first stack word holding `value`, as `on_stack` reads
+/// the stack.
+fn stack_word(value: usize, low: usize, high: usize, opaque: &[(usize, usize)]) -> Option<usize> {
     let mut at = low & !7;
     while at + 8 <= high {
         if let Some(&(_, end)) = opaque.iter().find(|(lo, hi)| (*lo..*hi).contains(&at)) {
@@ -110,11 +116,17 @@ fn on_stack(value: usize, low: usize, high: usize, opaque: &[(usize, usize)]) ->
             continue;
         }
         if unsafe { *(at as *const usize) } == value {
-            return true;
+            return Some(at);
         }
         at += 8;
     }
-    false
+    None
+}
+
+/// `RAYZOR_GC_TRACE` prints what each collection decided about each target.
+fn trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RAYZOR_GC_TRACE").is_some())
 }
 
 // `Gc.full_major()` and the other collection requests: run the callbacks of
@@ -197,6 +209,19 @@ fn collect_above(low: usize) {
                         .target
                         .strong_count()
                         .saturating_sub(usize::from(r.held.is_some()));
+                    if trace_enabled() {
+                        let hit = stack_word(r.handle, low, high, &opaque);
+                        eprintln!(
+                            "[gc] handle={:#x} strong={} held={} others={} stack_word={} \
+                             (low={low:#x} +{:#x}) high={high:#x} opaque={opaque:x?}",
+                            r.handle,
+                            r.target.strong_count(),
+                            r.held.is_some(),
+                            others,
+                            hit.map_or("none".to_string(), |a| format!("{a:#x}")),
+                            hit.map_or(0, |a| a - low),
+                        );
+                    }
                     others == 0 || (others == 1 && !on_stack(r.handle, low, high, &opaque))
                 });
             *registrations = live;

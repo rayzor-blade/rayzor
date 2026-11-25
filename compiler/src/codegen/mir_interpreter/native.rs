@@ -153,6 +153,13 @@ pub(super) unsafe fn call(target: usize, args: &[(u64, Mt)], ret: Ret) -> Result
         _ => args,
     };
     let p = place(args)?;
+    // The interpreter's frames, this one included, hold dead copies of values
+    // whose live copies are in its registers (a callee-saved register pushed
+    // here is one). A collection the callee asks for must not read them as
+    // references, so the stack from here up is marked; the callee's own frames
+    // lie below this point and are still read.
+    let (low, high) = (super::stack_pointer(), super::ENTRY_SP.with(|e| e.get()));
+    let _opaque = (low < high).then(|| rayzor_runtime::gc::OpaqueFrames::new(low, high));
     unsafe {
         match ret {
             Ret::Void => {

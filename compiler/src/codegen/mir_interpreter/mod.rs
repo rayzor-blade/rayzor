@@ -419,11 +419,6 @@ impl Machine {
     fn native<T>(&self, call: impl FnOnce() -> Result<T, String>) -> Result<T, InterpError> {
         let d = self.native_depth.get();
         self.native_depth.set(d + 1);
-        // The interpreter's frames hold copies of values whose live copies
-        // are in its registers; a collection the callee asks for must not
-        // read them as references.
-        let (low, high) = (stack_pointer(), ENTRY_SP.with(|e| e.get()));
-        let _opaque = (low < high).then(|| rayzor_runtime::gc::OpaqueFrames::new(low, high));
         let r = call();
         self.native_depth.set(d);
         r.map_err(InterpError::RuntimeError)
