@@ -146,8 +146,12 @@ jobs:
           # and load no .hdll, so LIBS= is enough.
           sudo apt-get update
           sudo apt-get install -y libpcre2-dev
-          git clone --depth 1 https://github.com/HaxeFoundation/hashlink.git /tmp/hashlink
+          # Pinned: later HashLink renames `hl_type.vobj_proto`, so the C that
+          # Haxe 4.3.6 generates for haxe-hashlink-c no longer compiles.
+          git init -q /tmp/hashlink
           cd /tmp/hashlink
+          git fetch -q --depth 1 https://github.com/HaxeFoundation/hashlink.git ae0e2247640c5c4da1140d7ee82f7120aca9bd80
+          git checkout -q FETCH_HEAD
           make LIBS= -j"$(nproc)"
           # `make install` copies *.hdll unconditionally and fails when none were
           # built, so place the pieces directly.
