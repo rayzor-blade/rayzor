@@ -607,7 +607,7 @@ pub(crate) struct Function {
     /// for in the background. Shared by every decoding of the function, so a
     /// copy decoded again after eviction carries on counting.
     pub heat: Arc<std::sync::atomic::AtomicU64>,
-    /// What the decoded form roughly occupies, for the cache's budget.
+    /// What the decoded form occupies on the heap, for the cache's budget.
     pub bytes: usize,
     pub abi: Abi,
     pub return_type: IrType,
@@ -620,6 +620,108 @@ pub(crate) struct Function {
     pub live_slots: usize,
     pub entry: u32,
     pub blocks: Vec<Block>,
+}
+
+/// Bytes of every decoded function now alive, cached or held by a running
+/// frame.
+pub(crate) static ALIVE_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+impl Drop for Function {
+    fn drop(&mut self) {
+        ALIVE_BYTES.fetch_sub(self.bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Where a decoded function's heap goes.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Footprint {
+    /// The instruction vectors.
+    pub ops: usize,
+    /// The function and block headers.
+    pub blocks: usize,
+    /// Payloads of the instructions held out of line.
+    pub boxed: usize,
+    /// Call arguments and closure captures.
+    pub args: usize,
+    /// Phi moves, switch cases and struct return fields.
+    pub moves: usize,
+    /// Register types, block ids and parameters.
+    pub registers: usize,
+    /// Names and messages.
+    pub other: usize,
+}
+
+impl Footprint {
+    pub fn total(&self) -> usize {
+        self.ops + self.blocks + self.boxed + self.args + self.moves + self.registers + self.other
+    }
+
+    pub fn add(&mut self, o: Footprint) {
+        self.ops += o.ops;
+        self.blocks += o.blocks;
+        self.boxed += o.boxed;
+        self.args += o.args;
+        self.moves += o.moves;
+        self.registers += o.registers;
+        self.other += o.other;
+    }
+}
+
+fn vec_bytes<T>(v: &Vec<T>) -> usize {
+    v.capacity() * std::mem::size_of::<T>()
+}
+
+impl Function {
+    pub(crate) fn footprint(&self) -> Footprint {
+        let mut at = Footprint {
+            blocks: std::mem::size_of::<Function>() + vec_bytes(&self.blocks),
+            registers: vec_bytes(&self.reg_mts)
+                + vec_bytes(&self.block_ids)
+                + vec_bytes(&self.params)
+                + vec_bytes(&self.abi.params),
+            other: self.name.len(),
+            ..Default::default()
+        };
+        let edge = |e: &Edge| vec_bytes(&e.moves);
+        for block in &self.blocks {
+            at.ops += vec_bytes(&block.ops);
+            for op in &block.ops {
+                match op {
+                    Op::Call(c) => {
+                        at.boxed += std::mem::size_of::<Call>();
+                        at.args += vec_bytes(&c.args);
+                    }
+                    Op::CallIndirect(c) => {
+                        at.boxed += std::mem::size_of::<IndirectCall>();
+                        at.args += vec_bytes(&c.args);
+                    }
+                    Op::Closure(c) => {
+                        at.boxed += std::mem::size_of::<ClosureOp>();
+                        at.args += vec_bytes(&c.captures);
+                    }
+                    Op::CheckLive { name, .. } => at.other += name.len(),
+                    Op::Trap { message } => at.other += message.len(),
+                    _ => {}
+                }
+            }
+            match &block.term {
+                Term::Jump(e) => at.moves += edge(e),
+                Term::Brif {
+                    then, otherwise, ..
+                } => at.moves += edge(then) + edge(otherwise),
+                Term::Switch { cases, default, .. } => {
+                    at.moves += vec_bytes(cases)
+                        + cases.iter().map(|(_, e)| edge(e)).sum::<usize>()
+                        + edge(default)
+                }
+                Term::ReturnSret { fields, .. } => at.moves += vec_bytes(fields),
+                Term::Trap(message) => at.other += message.len(),
+                Term::Return(_) => {}
+            }
+        }
+        at
+    }
 }
 
 /// Whether `function` takes a hidden environment parameter in compiled code.
@@ -969,14 +1071,7 @@ pub(crate) fn decode(
     }
 
     let reg_mts: Vec<Mt> = (0..d.next_reg).map(|r| d.mt_of(r)).collect();
-    let bytes = std::mem::size_of::<Function>()
-        + blocks
-            .iter()
-            .map(|b| std::mem::size_of::<Block>() + b.ops.capacity() * std::mem::size_of::<Op>())
-            .sum::<usize>()
-        + order.len() * std::mem::size_of::<IrBlockId>()
-        + reg_mts.len() * std::mem::size_of::<Mt>();
-    Ok(Function {
+    let mut decoded = Function {
         id: func_id,
         name: Arc::from(function.name.as_str()),
         module: d.module_addr,
@@ -984,7 +1079,7 @@ pub(crate) fn decode(
         reg_mts,
         osr: super::exec::OsrCache::default(),
         heat: program.heat_of(d.module_addr, func_id),
-        bytes,
+        bytes: 0,
         abi,
         return_type: function.signature.return_type.clone(),
         params,
@@ -994,7 +1089,10 @@ pub(crate) fn decode(
         live_slots: d.live.len(),
         entry: d.block_index[&function.cfg.entry_block],
         blocks,
-    })
+    };
+    decoded.bytes = decoded.footprint().total();
+    ALIVE_BYTES.fetch_add(decoded.bytes, std::sync::atomic::Ordering::Relaxed);
+    Ok(decoded)
 }
 
 /// Blocks in the order the lowering visits them: reverse post-order from the

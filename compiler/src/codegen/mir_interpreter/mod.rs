@@ -17,7 +17,7 @@ mod native;
 mod trampoline;
 
 use std::cell::Cell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -685,12 +685,65 @@ impl MirInterpreter {
 
     /// How many interpreted loops have carried on in compiled code.
     /// Distinct functions decoded so far, and what the cache holds in bytes.
-    pub fn decode_stats(&self) -> (usize, usize) {
+    /// How much of the program was decoded, given the number of functions
+    /// that have a body, and what the decoded cache holds.
+    pub fn decode_report(&self, bodies: usize) -> String {
+        use std::fmt::Write;
         let program = &self.machine.program;
-        (
+        let cache = program.decoded.read().unwrap();
+        let mut total = decode::Footprint::default();
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        let mut largest: Vec<(usize, usize, usize, Arc<str>)> = Vec::new();
+        for f in cache.values() {
+            total.add(f.footprint());
+            let mut ops = 0;
+            for op in f.blocks.iter().flat_map(|b| &b.ops) {
+                ops += 1;
+                let text = format!("{op:?}");
+                let kind = text.split([' ', '(', '{']).next().unwrap_or("?");
+                *kinds.entry(kind.to_string()).or_default() += 1;
+            }
+            largest.push((f.bytes, ops, f.blocks.len(), f.name.clone()));
+        }
+        let mb = |n: usize| n as f64 / 1e6;
+        let mut out = format!(
+            "[interp] decoded {} of {bodies} functions; cache holds {:.1} MB",
             program.decoded_once.read().unwrap().len(),
-            program.decoded_bytes.load(Ordering::Relaxed),
-        )
+            mb(program.decoded_bytes.load(Ordering::Relaxed)),
+        );
+        let alive = decode::ALIVE_BYTES.load(Ordering::Relaxed);
+        let _ = write!(
+            out,
+            "\n[interp] alive {:.1} MB, of which cached {:.1} MB: ops {:.1}, headers {:.1}, \
+             boxed ops {:.1}, call args {:.1}, phi moves {:.1}, registers {:.1}, names {:.1}",
+            mb(alive),
+            mb(total.total()),
+            mb(total.ops),
+            mb(total.blocks),
+            mb(total.boxed),
+            mb(total.args),
+            mb(total.moves),
+            mb(total.registers),
+            mb(total.other),
+        );
+        let mut kinds: Vec<_> = kinds.into_iter().collect();
+        kinds.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        let all: usize = kinds.iter().map(|k| k.1).sum();
+        let top: Vec<String> = kinds
+            .iter()
+            .take(10)
+            .map(|(k, n)| format!("{k} {n}"))
+            .collect();
+        let _ = write!(out, "\n[interp] {all} ops: {}", top.join(", "));
+        largest.sort_by_key(|f| std::cmp::Reverse(f.0));
+        for (bytes, ops, blocks, name) in largest.iter().take(10) {
+            let _ = write!(
+                out,
+                "\n[interp] large {:.0} KB, {ops} ops, {blocks} blocks: {name}",
+                *bytes as f64 / 1e3
+            );
+        }
+        out
     }
 
     pub fn transfers(&self) -> u64 {

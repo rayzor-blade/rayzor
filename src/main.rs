@@ -2213,11 +2213,7 @@ fn run_file(
     // for one where transferring was free.
     // RAYZOR_INTERP_STATS=1 prints how much of the program the interpreter decoded.
     if std::env::var_os("RAYZOR_INTERP_STATS").is_some() {
-        let (decoded, bodies, bytes) = backend.interpreter_decode_stats();
-        eprintln!(
-            "[interp] decoded {decoded} of {bodies} functions; cache holds {:.1} MB",
-            bytes as f64 / 1e6
-        );
+        eprintln!("{}", backend.interpreter_decode_report());
     }
 
     if compiler::ir::osr::osr_trace_enabled() {
