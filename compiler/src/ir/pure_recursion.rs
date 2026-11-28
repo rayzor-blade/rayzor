@@ -234,7 +234,10 @@ fn expand_and_reuse(module: &mut IrModule, id: IrFunctionId) -> usize {
             args: args.clone(),
             dest: *dest,
         };
-        let mut next_reg = next_register(module);
+        let mut next_reg = module
+            .functions
+            .get(&id)
+            .map_or(0, super::inlining::first_free_register);
         if InliningPass::inline_call_site(module, &site, &mut next_reg).is_err() {
             module.functions.insert(id, original.clone());
             continue;
@@ -255,24 +258,6 @@ fn expand_and_reuse(module: &mut IrModule, id: IrFunctionId) -> usize {
         module.functions.insert(id, original.clone());
     }
     0
-}
-
-fn next_register(module: &IrModule) -> u32 {
-    let mut next = 0u32;
-    for function in module.functions.values() {
-        next = next.max(function.next_reg_id);
-        for block in function.cfg.blocks.values() {
-            for phi in &block.phi_nodes {
-                next = next.max(phi.dest.as_u32() + 1);
-            }
-            for inst in &block.instructions {
-                if let Some(dest) = inst.dest() {
-                    next = next.max(dest.as_u32() + 1);
-                }
-            }
-        }
-    }
-    next
 }
 
 fn int_bits(value: &IrValue) -> Option<i64> {

@@ -941,8 +941,8 @@ impl InliningPass {
         }
 
         // CRITICAL: Sync the caller's per-function `next_reg_id` with the
-        // global counter that `inline_call_site` has been advancing for
-        // its new register allocations. Without this, subsequent
+        // counter that `inline_call_site` has been advancing for its new
+        // register allocations. Without this, subsequent
         // optimization passes (BCE in particular) call
         // `caller.alloc_reg()` and get back IrIds that were ALREADY used
         // by the inlined body — producing duplicate SSA defs. GVN then
@@ -1044,21 +1044,6 @@ impl OptimizationPass for InliningPass {
                 b.loop_depth.cmp(&a.loop_depth)
             });
 
-            // Find the highest register ID in use
-            let mut next_reg_id = 0u32;
-            for function in module.functions.values() {
-                for block in function.cfg.blocks.values() {
-                    for phi in &block.phi_nodes {
-                        next_reg_id = next_reg_id.max(phi.dest.as_u32() + 1);
-                    }
-                    for inst in &block.instructions {
-                        if let Some(dest) = inst.dest() {
-                            next_reg_id = next_reg_id.max(dest.as_u32() + 1);
-                        }
-                    }
-                }
-            }
-
             // Inline call sites grouped by caller, processing each caller's
             // sites in strictly descending instruction_index order. Descending
             // order makes multiple inlines into the SAME block sound:
@@ -1082,6 +1067,10 @@ impl OptimizationPass for InliningPass {
 
             let mut any_inlined = false;
             for (caller_id, sites) in &sites_by_caller {
+                let mut next_reg_id = module
+                    .functions
+                    .get(caller_id)
+                    .map_or(0, first_free_register);
                 let mut caller_modified = false;
                 for candidate in sites {
                     match Self::inline_call_site(module, candidate, &mut next_reg_id) {
@@ -1115,6 +1104,52 @@ impl OptimizationPass for InliningPass {
         }
         result
     }
+}
+
+/// The first register id past everything `function` names. Registers are per
+/// function, so a body inlined from here keeps the caller's register numbers,
+/// and the tables sized by them, as small as the code in it.
+pub(super) fn first_free_register(function: &IrFunction) -> u32 {
+    let mut next = function.next_reg_id;
+    let mut see = |reg: IrId| {
+        if reg.is_valid() {
+            next = next.max(reg.as_u32() + 1);
+        }
+    };
+    for parameter in &function.signature.parameters {
+        see(parameter.reg);
+    }
+    // A type left over from a removed instruction still claims its id.
+    if let Some((reg, _)) = function.register_types.last_key_value() {
+        see(*reg);
+    }
+    if let Some((reg, _)) = function.locals.last_key_value() {
+        see(*reg);
+    }
+    for block in function.cfg.blocks.values() {
+        for phi in &block.phi_nodes {
+            see(phi.dest);
+            for (_, value) in &phi.incoming {
+                see(*value);
+            }
+        }
+        for inst in &block.instructions {
+            if let Some(dest) = inst.dest() {
+                see(dest);
+            }
+            for used in inst.uses() {
+                see(used);
+            }
+        }
+        match &block.terminator {
+            IrTerminator::CondBranch { condition: reg, .. }
+            | IrTerminator::Switch { value: reg, .. }
+            | IrTerminator::Return { value: Some(reg) }
+            | IrTerminator::NoReturn { call: reg } => see(*reg),
+            _ => {}
+        }
+    }
+    next
 }
 
 /// Substitute TypeVar names with concrete types using the provided map.
@@ -1224,6 +1259,75 @@ mod tests {
 
         // A function with 3 instructions should be inlined
         assert!(3.0 <= cost_model.max_inline_size as f64);
+    }
+
+    /// Copies of a callee are numbered from the caller's own registers, not
+    /// from the highest register anywhere in the module.
+    #[test]
+    fn an_inlined_body_keeps_the_callers_register_numbers_small() {
+        use crate::ir::builder::{FunctionSignatureBuilder, IrBuilder};
+        use crate::tast::SymbolId;
+
+        let mut builder = IrBuilder::new("test".to_string(), "test.hx".to_string());
+        let signature = || {
+            FunctionSignatureBuilder::new()
+                .param("x".to_string(), IrType::I32)
+                .returns(IrType::I32)
+                .build()
+        };
+
+        let callee =
+            builder.start_function(SymbolId::from_raw(1), "add_one".to_string(), signature());
+        let x = builder
+            .current_function()
+            .unwrap()
+            .get_param_reg(0)
+            .unwrap();
+        let one = builder.build_int(1, IrType::I32).unwrap();
+        let sum = builder.build_add(x, one, false).unwrap();
+        builder.build_return(Some(sum));
+        builder.finish_function();
+
+        builder.start_function(SymbolId::from_raw(2), "far".to_string(), signature());
+        builder.current_function_mut().unwrap().next_reg_id = 100_000;
+        let far = builder.build_int(7, IrType::I32).unwrap();
+        builder.build_return(Some(far));
+        builder.finish_function();
+
+        let mut callers = Vec::new();
+        for (symbol, name) in [(3, "first"), (4, "second")] {
+            callers.push(builder.start_function(
+                SymbolId::from_raw(symbol),
+                name.to_string(),
+                signature(),
+            ));
+            let x = builder
+                .current_function()
+                .unwrap()
+                .get_param_reg(0)
+                .unwrap();
+            let result = builder
+                .build_call_direct(callee, vec![x], IrType::I32)
+                .unwrap();
+            builder.build_return(Some(result));
+            builder.finish_function();
+        }
+
+        let mut module = builder.module;
+        assert!(InliningPass::new().run_on_module(&mut module).modified);
+        for id in callers {
+            let function = &module.functions[&id];
+            assert!(
+                function.cfg.blocks.values().all(|b| b
+                    .instructions
+                    .iter()
+                    .all(|i| !matches!(i, IrInstruction::CallDirect { .. }))),
+                "{} still calls",
+                function.name
+            );
+            let end = first_free_register(function);
+            assert!(end < 100, "{} numbers up to {end}", function.name);
+        }
     }
 
     #[test]
